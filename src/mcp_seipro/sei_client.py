@@ -1793,11 +1793,20 @@ class SEIClient:
             raise Exception(f"Erro ao alterar anotação do bloco interno: {data.get('mensagem')}")
         return data.get("data", {"mensagem": data.get("mensagem")})
 
-    async def pesquisar_blocos_internos(self, filtro: str = "", limit: int = 50, start: int = 0) -> dict:
-        """Pesquisa blocos internos."""
+    async def pesquisar_blocos_internos(
+        self, filtro: str = "", limit: int = 50, start: int = 0, estado: str = ""
+    ) -> dict:
+        """Pesquisa blocos internos da unidade atual.
+
+        `filtro` vai como `filter` (palavras da descrição, BlocoRN::pesquisar);
+        `estado` é a lista de códigos separada por vírgula (ex.: "A,C").
+        O wssei ordena por id decrescente (mais recentes primeiro).
+        """
         params: dict = {"limit": limit, "start": start}
         if filtro:
             params["filter"] = filtro
+        if estado:
+            params["estado"] = estado
         resp = await self._request("GET", "/bloco/interno/pesquisar", params=params)
         data = resp.json()
         if not data.get("sucesso"):
