@@ -1,6 +1,6 @@
 # Integração SGP2RR MCPServer — versão adaptada ao servidor real
 
-**Estado:** código pronto para homologação offline; nenhum arquivo da produção foi alterado.
+**Estado em 01/11/2026:** o operador confirmou 30/30 testes aprovados no Ubuntu, cópia de homologação íntegra e registro das 13 ferramentas no MCPServer real (5 atuais + 8 novas), inclusive pelo carregamento completo com `runpy.run_path`. **Nenhum deploy realizado e nenhuma ferramenta nova disponibilizada em produção.**
 
 O diagnóstico realizado em 01/11/2026 identificou que:
 
@@ -70,7 +70,7 @@ bloqueia redirecionamentos.
 
 ## 3. Verificações antes de qualquer deploy
 
-1. Conferir os 30 testes automatizados (mocks) e o parse do script real.
+1. **Concluído:** 30 testes com mocks aprovados no Ubuntu; sintaxe e AST da cópia do script real validados; carregamento isolado registrou 13/13 ferramentas.
 2. Validar as novas ferramentas em um serviço MCP isolado de homologação,
    sem usar a porta ou o service de produção.
 3. Homologar pesquisa por nome, mãe, pai, CPF, endereço e código com
@@ -87,7 +87,50 @@ bloqueia redirecionamentos.
 A opção de busca por foto consta no formulário, mas sua semântica ainda
 não foi homologada. O adaptador não exporta imagens.
 
-## 4. Produção
+## 4. Atualização do clone de homologação
+
+Para atualizar apenas o clone GitHub previamente baixado, sem modificar o servidor em execução:
+
+~~~bash
+cd /home/ubuntu/sgp2rr-src-EXEMPLO  # substituir pelo diretório real de clone
+# Consulte o branch e quaisquer alterações locais antes do pull.
+git status --short --branch
+git pull --ff-only origin feat/sgp2rr-canaime-chatgpt
+~~~
+
+A cópia de homologação gerada anteriormente NÃO se atualiza automaticamente com o `git pull` do clone. Para gerar uma nova cópia com a versão revisada, execute `prepare_integration.py` novamente em **outra pasta vazia**, nunca sobre a pasta do serviço ativo.
+
+## 5. Conferência de porta e inicialização
+
+O diagnóstico AST reportado em 01/11/2026 identificou `uvicorn.run` na linha 563 do arquivo original, com argumentos `host`, `port`, `proxy_headers` e `forwarded_allow_ips`, além de `mcp.run` na linha 571. **Não inferir a porta de produção a partir do nome do projeto**. Verifique a porta e os argumentos reais sem publicar variáveis de ambiente, tokens, cookies ou secrets.
+
+~~~bash
+cd /home/ubuntu/sgp2rr-mcp || exit 1
+python3 - <<'PY'
+import ast
+from pathlib import Path
+root = ast.parse(Path('sgp2rr_mcp.py').read_text(encoding='utf-8'))
+for n in ast.walk(root):
+    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+        if isinstance(n.func.value, ast.Name) and n.func.value.id == 'uvicorn' and n.func.attr == 'run':
+            print('uvicorn.run:', 'linha', n.lineno)
+            for kw in n.keywords:
+                if kw.arg in ('host', 'port'):
+                    expr = kw.value
+                    if isinstance(expr, ast.Name):
+                        desc = 'variável ' + expr.id
+                    elif isinstance(expr, ast.Constant) and isinstance(expr.value, int):
+                        desc = 'porta numérica ' + str(expr.value)
+                    else:
+                        desc = 'expressão (verificar localmente sem publicar segredos)'
+                    print(kw.arg + ':', desc)
+PY
+sudo ss -ltnp
+~~~
+
+Não iniciar segunda instância conectada ao mesmo gerenciador OAuth ou reutilizando dados da produção antes de definir portas, sessões e credenciais realmente isoladas.
+
+## 6. Produção
 
 Nenhuma implantação em produção é incluída neste procedimento. Antes
 de copiar arquivos para /home/ubuntu/sgp2rr-mcp ou reiniciar
