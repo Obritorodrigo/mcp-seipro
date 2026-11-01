@@ -58,6 +58,11 @@ class UsuarioFicticio:
             return PESQUISA
         if caminho == "areas/unidades/pesquisa_Iframe%20CODIGO.php":
             return CODIGO
+        if caminho.startswith("areas/unidades/pesquisa_resultadoVULGO.php?"):
+            return "1 REEDUCANDO(S) CADASTRADO(S)\nID 77\nCADASTRO FICTICIO\n"
+        if caminho == "areas/unidades/Ficha_Menu.php?id_cad_preso=77":
+            return ("## Links\n[1] (quadro) ficha → "
+                    "areas/unidades/Ficha_Preso_index.php?id_cad_preso=77\n")
         if caminho == "areas/unidades/Ficha_Preso_index.php?id_cad_preso=77":
             return "## Texto\nCódigo\n77\nNome\nCADASTRO FICTICIO\n"
         raise AssertionError("Navegação inesperada")
@@ -75,7 +80,7 @@ class UsuarioFicticio:
 
     def cliente(self):
         return ClienteAutenticado(
-            abrir=self.abrir, enviar=self.enviar, sessao_http=self.session
+            abrir=self.abrir, sessao_http=self.session
         )
 
 
@@ -137,6 +142,7 @@ class AdapterTests(unittest.TestCase):
             "Pesquisar",
         )
         self.assertIn("1 REEDUCANDO", text)
+        self.assertNotIn("enviar", [entry[0] for entry in self.user.calls])
         with self.assertRaises(PermissionError):
             self.adapter.enviar_formulario(
                 1, {"busca1": "nome", "busca2": "NOME FICTICIO", "busca3": ""},
@@ -172,7 +178,7 @@ class AdapterTests(unittest.TestCase):
             self.adapter.baixar_anexo("fotos/presos_doc/0123456789abcdef.pdf")
 
     def test_pdf_no_session_fails_closed(self):
-        empty = ClienteAutenticado(self.user.abrir, self.user.enviar)
+        empty = ClienteAutenticado(self.user.abrir)
         with self.assertRaises(RuntimeError):
             AdaptadorSGP2RR(empty).baixar_anexo(
                 "fotos/presos_doc/0123456789abcdef.pdf"
