@@ -4510,6 +4510,7 @@ async def sei_pesquisar_blocos_internos(
         encontrados: dict[str, dict] = {}
         varridos = 0
         truncado = False
+        parou_cedo = False  # listagem sem nome: parou ao atingir `limit`
 
         def considerar(itens):
             for bruto in itens or []:
@@ -4531,6 +4532,7 @@ async def sei_pesquisar_blocos_internos(
 
         for pagina in range(_MAX_PAGINAS_BLOCOS):
             if not termos and len(encontrados) >= limit:
+                parou_cedo = True
                 break
             r = await client.pesquisar_blocos_internos(
                 limit=_TAM_PAGINA_BLOCOS, start=pagina, estado=estado
@@ -4549,8 +4551,13 @@ async def sei_pesquisar_blocos_internos(
             "estado": estado or "todos",
             "total_encontrado": len(blocos),
             "retornados": min(len(blocos), limit),
+            "tem_mais": parou_cedo or len(blocos) > limit,
             "blocos": blocos[:limit],
         }
+        if parou_cedo:
+            # Sem nome a varredura para cedo (cada página custa ao SEI uma
+            # contagem de processos por bloco), então o total é parcial.
+            resultado["total_encontrado"] = None
         if truncado:
             resultado["_aviso"] = (
                 f"A unidade tem mais de {varridos} blocos; só os "

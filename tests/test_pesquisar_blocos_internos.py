@@ -90,7 +90,26 @@ async def test_sem_nome_lista_mais_recentes_primeiro(usar):
     usar(ClienteBlocos(BLOCOS))
     r = await _pesquisar(limit=2)
     assert [b["id"] for b in r["blocos"]] == ["905", "904"]
-    assert r["total_encontrado"] >= 2
+    assert r["tem_mais"] is True
+
+
+@pytest.mark.asyncio
+async def test_sem_nome_com_pagina_menor_que_limite_parou_cedo(usar, monkeypatch):
+    # Página de 100 e limit 20: antes devolvia total_encontrado=100 (tamanho da
+    # página, não da unidade). Agora o total é desconhecido e tem_mais=True.
+    monkeypatch.setattr(srv, "_TAM_PAGINA_BLOCOS", 3)
+    usar(ClienteBlocos(BLOCOS))
+    r = await _pesquisar(limit=2)
+    assert r["total_encontrado"] is None
+    assert r["tem_mais"] is True
+
+
+@pytest.mark.asyncio
+async def test_com_nome_total_e_exato(usar):
+    usar(ClienteBlocos(BLOCOS))
+    r = await _pesquisar(nome="sejuc")
+    assert r["total_encontrado"] == 1
+    assert r["tem_mais"] is False
 
 
 @pytest.mark.asyncio
