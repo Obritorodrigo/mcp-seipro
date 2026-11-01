@@ -11,7 +11,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+
+from sgp2rr_search import CRITERIOS, UNIDADES
 
 from sgp2rr_tools import registrar_ferramentas
 
@@ -77,7 +79,6 @@ class ClienteAutenticado:
     sessao_http: objeto requests.Session autenticado desse usuário (opcional).
     """
     abrir: Callable[[str], Any]
-    enviar: Callable[[int, dict[str, str], str], Any]
     sessao_http: Any | None = None
 
 
@@ -97,8 +98,8 @@ class AdaptadorSGP2RR:
     def __init__(self, cliente: ClienteAutenticado):
         if not isinstance(cliente, ClienteAutenticado):
             raise RuntimeError("Cliente autenticado da requisição não disponível")
-        if not callable(cliente.abrir) or not callable(cliente.enviar):
-            raise RuntimeError("Operações autenticadas não disponíveis")
+        if not callable(cliente.abrir):
+            raise RuntimeError("Leitura autenticada não disponível")
         self.cliente = cliente
         self._formulario_atual: str | None = None
 
@@ -123,6 +124,10 @@ class AdaptadorSGP2RR:
                 botao == "Pesquisar"
                 and set(campos) == {"busca1", "busca2", "busca3"}
                 and all(isinstance(campos[k], str) for k in campos)
+                and campos["busca1"] in (set(CRITERIOS) - {"codigo"})
+                and campos["busca3"] in ("", *UNIDADES)
+                and bool(campos["busca2"].strip())
+                and len(campos["busca2"]) <= 120
             )
         elif self._formulario_atual == "codigo":
             valid = (
@@ -136,7 +141,24 @@ class AdaptadorSGP2RR:
         if not valid:
             raise PermissionError("Operação fora dos formulários de leitura autorizados")
         self._formulario_atual = None
-        return _texto(self.cliente.enviar(formulario, campos, botao))
+        # GET direto com action fixa, sem depender do último formulário
+        # exibido por outro processo na mesma sessão web.
+        if botao == "Pesquisar":
+            target = (
+                "areas/unidades/pesquisa_resultadoVULGO.php?"
+                + urlencode({
+                    "busca3": campos["busca3"],
+                    "busca1": campos["busca1"],
+                    "busca2": campos["busca2"],
+                    "Submit2": "Pesquisar",
+                })
+            )
+        else:
+            target = (
+                "areas/unidades/Ficha_Menu.php?"
+                + urlencode({"id_cad_preso": campos["id_cad_preso"]})
+            )
+        return _texto(self.cliente.abrir(target))
 
     def baixar_anexo(self, caminho: str) -> tuple[bytes, str]:
         """Baixa PDF pela sessão atual, sem redirecionamentos entre hosts."""
