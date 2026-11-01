@@ -5355,6 +5355,252 @@ async def sei_pesquisar_blocos_internos(
         return _error(str(e))
 
 
+# ---------------------------------------------------------------------------
+# Prazos e pendências da unidade
+# ---------------------------------------------------------------------------
+
+def _hoje():
+    """Data de hoje no fuso do órgão (SEI_FUSO_HORARIO, padrão America/Sao_Paulo)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        fuso = ZoneInfo(os.environ.get("SEI_FUSO_HORARIO", "America/Sao_Paulo"))
+    except Exception:
+        fuso = ZoneInfo("America/Sao_Paulo")
+    return datetime.now(fuso).date()
+
+
+async def _processos_da_unidade(client: SEIClient, maximo: int) -> list[dict]:
+    """Caixa da unidade atual, paginada (start = página), até `maximo` itens."""
+    itens: list[dict] = []
+    pagina = 0
+    while len(itens) < maximo:
+        r = await client.listar_processos(limit=50, start=pagina)
+        lote = [p for p in (r.get("processos") or []) if isinstance(p, dict)]
+        itens.extend(lote)
+        if len(lote) < 50:
+            break
+        pagina += 1
+    return itens[:maximo]
+
+
+def _prazo_do_processo(bruto: dict, hoje) -> dict | None:
+    """Prazo de um item de /processo/listar: retorno programado ou marcador com data."""
+    from datetime import date
+
+    att = bruto.get("atributos") or {}
+    status = att.get("status") or {}
+    origem, data_txt = None, None
+    retorno = status.get("retornoData")
+    if isinstance(retorno, dict) and retorno.get("dataProgramada"):
+        data_txt = str(retorno["dataProgramada"])
+        origem = f"retorno programado (enviado por {retorno.get('unidade') or '?'})"
+    else:
+        for m in att.get("marcador") or []:
+            if isinstance(m, dict):
+                achado = re.search(r"(\d{2})/(\d{2})/(\d{4})", f"{m.get('texto') or ''} {m.get('nome') or ''}")
+                if achado:
+                    data_txt = achado.group(0)
+                    origem = f"marcador {html.unescape(str(m.get('nome') or '')).strip()}"
+                    break
+    if not data_txt:
+        return None
+    try:
+        d, mth, a = (int(x) for x in re.findall(r"\d+", data_txt)[:3])
+        alvo = date(a, mth, d)
+    except Exception:
+        return None
+    dias = (alvo - hoje).days
+    if dias < 0:
+        situacao = f"vencido há {-dias} dia(s)"
+    elif dias == 0:
+        situacao = "vence hoje"
+    else:
+        situacao = f"vence em {dias} dia(s)"
+    return {"prazo": alvo.strftime("%d/%m/%Y"), "dias_restantes": dias,
+            "situacao": situacao, "origem": origem}
+
+
+def _processo_resumido(bruto: dict, unidade_ativa: str | None) -> dict:
+    p = shape_processo_resumido(bruto, unidade_ativa)
+    return {
+        "protocolo": p.get("protocolo"),
+        "id_procedimento": p.get("id_procedimento"),
+        "tipo": p.get("tipo"),
+        "descricao": p.get("descricao"),
+        "atribuido_a": (p.get("atribuido_unidade_atual") or {}).get("nome")
+        if isinstance(p.get("atribuido_unidade_atual"), dict) else p.get("atribuido_unidade_atual"),
+    }
+
+
+@mcp.tool()
+async def sei_listar_prazos(
+    dias: int = 15,
+    incluir_vencidos: bool = True,
+    max_processos: int = 200,
+    ctx: Context = None,
+) -> str:
+    """Lista processos da unidade atual com prazo vencido ou vencendo em até `dias`.
+
+    O prazo vem do retorno programado do SEI (data em que o processo deve
+    voltar) ou de um marcador cujo texto tenha data (dd/mm/aaaa). Ordenado do
+    mais urgente ao menos urgente. Somente leitura.
+
+    Parâmetros:
+    - dias: horizonte em dias a partir de hoje (padrão 15)
+    - incluir_vencidos: incluir os já vencidos (padrão true)
+    - max_processos: quantos processos da caixa examinar (padrão 200)
+    """
+    try:
+        client = _get_client(ctx)
+        hoje = _hoje()
+        processos = await _processos_da_unidade(client, max_processos)
+        itens = []
+        for bruto in processos:
+            prazo = _prazo_do_processo(bruto, hoje)
+            if not prazo or prazo["dias_restantes"] > dias:
+                continue
+            if prazo["dias_restantes"] < 0 and not incluir_vencidos:
+                continue
+            itens.append({**_processo_resumido(bruto, client._unidade_ativa), **prazo})
+        itens.sort(key=lambda x: x["dias_restantes"])
+        return _json({
+            "hoje": hoje.strftime("%d/%m/%Y"),
+            "horizonte_dias": dias,
+            "processos_examinados": len(processos),
+            "total": len(itens),
+            "vencidos": sum(1 for i in itens if i["dias_restantes"] < 0),
+            "prazos": itens,
+        })
+    except Exception as e:
+        return _error(str(e))
+
+
+async def _documentos_sem_assinatura(client: SEIClient, processos: list[dict],
+                                     unidade: str | None, maximo: int) -> list[dict]:
+    """Documentos internos gerados pela unidade, não assinados nem cancelados."""
+    sem = asyncio.Semaphore(4)
+    achados: list[dict] = []
+
+    async def examinar(bruto):
+        att = bruto.get("atributos") or {}
+        id_proc = str(att.get("idProcedimento") or bruto.get("id") or "")
+        if not id_proc:
+            return
+        async with sem:
+            try:
+                dados = await client.listar_documentos_todos(id_proc)
+            except Exception:
+                return
+        for d in dados.get("documentos") or []:
+            a = d.get("atributos") or {}
+            st = a.get("status") or {}
+            if (a.get("tipoDocumento") == "I" and str(a.get("idUnidade")) == str(unidade)
+                    and st.get("documentoAssinado") == "N" and st.get("documentoCancelado") != "S"):
+                achados.append({
+                    "documento": html.unescape(str(a.get("nomeComposto") or "")),
+                    "numero_sei": a.get("protocoloFormatado"),
+                    "descricao": html.unescape(str(a.get("informacao") or "")),
+                    "processo": att.get("numero"),
+                })
+
+    await asyncio.gather(*(examinar(b) for b in processos[:maximo]))
+    return achados
+
+
+@mcp.tool()
+async def sei_listar_pendencias(
+    dias_prazo: int = 7,
+    verificar_documentos: int = 20,
+    max_processos: int = 200,
+    ctx: Context = None,
+) -> str:
+    """Resumo das pendências da unidade atual — o "o que eu preciso fazer hoje".
+
+    Reúne, numa chamada só e sem alterar nada:
+    - prazos vencidos ou vencendo em até `dias_prazo` dias;
+    - processos recebidos e ainda não abertos na unidade;
+    - processos com documento novo;
+    - processos atribuídos a você;
+    - blocos de assinatura abertos, disponibilizados ou retornados;
+    - documentos gerados pela unidade e ainda SEM ASSINATURA, nos
+      `verificar_documentos` processos mais recentes da caixa (cada um custa
+      uma consulta ao SEI; 0 desliga).
+
+    Para outra unidade, use sei_trocar_unidade antes.
+    """
+    try:
+        client = _get_client(ctx)
+        hoje = _hoje()
+        processos = await _processos_da_unidade(client, max_processos)
+        unidade = client._unidade_ativa
+        meu_id = str(getattr(client, "_id_usuario", "") or "")
+        meu_nome = _normalizar_busca(getattr(client, "_nome_usuario", "") or "")
+
+        prazos, nao_lidos, doc_novo, meus = [], [], [], []
+        for bruto in processos:
+            att = bruto.get("atributos") or {}
+            st = att.get("status") or {}
+            resumo = _processo_resumido(bruto, unidade)
+            prazo = _prazo_do_processo(bruto, hoje)
+            if prazo and prazo["dias_restantes"] <= dias_prazo:
+                prazos.append({**resumo, **prazo})
+            if str(st.get("processoAcessadoUnidade")) == "N":
+                nao_lidos.append(resumo)
+            if str(st.get("documentoNovo")) == "S":
+                doc_novo.append(resumo)
+            atrib = shape_processo_resumido(bruto, unidade).get("atribuido_unidade_atual")
+            if isinstance(atrib, dict) and (
+                (meu_id and str(atrib.get("id_usuario") or "") == meu_id)
+                or (meu_nome and _normalizar_busca(atrib.get("nome") or "") == meu_nome)
+            ):
+                meus.append(resumo)
+        prazos.sort(key=lambda x: x["dias_restantes"])
+
+        blocos = []
+        try:
+            r = await client.pesquisar_blocos_assinatura(limit=100, estado="A,D,R")
+            sigla_atual = next((u.get("sigla") for u in await client.listar_unidades_usuario()
+                                if u.get("atual")), None)
+            for b in r.get("blocos") or []:
+                resumo_b = _bloco_assinatura_resumido(b)
+                if not resumo_b.get("numero_documentos") or str(resumo_b["numero_documentos"]) == "0":
+                    continue
+                resumo_b["origem"] = ("recebido de outra unidade"
+                                      if sigla_atual and resumo_b.get("unidade") != sigla_atual
+                                      else "da unidade")
+                blocos.append(resumo_b)
+        except Exception:
+            logger.debug("Falha ao listar blocos de assinatura", exc_info=True)
+
+        sem_assinatura = (await _documentos_sem_assinatura(client, processos, unidade, verificar_documentos)
+                          if verificar_documentos > 0 else [])
+
+        return _json({
+            "hoje": hoje.strftime("%d/%m/%Y"),
+            "processos_na_caixa": len(processos),
+            "resumo": {
+                "prazos_ate_%d_dias" % dias_prazo: len(prazos),
+                "nao_lidos": len(nao_lidos),
+                "com_documento_novo": len(doc_novo),
+                "atribuidos_a_mim": len(meus),
+                "blocos_de_assinatura": len(blocos),
+                "documentos_sem_assinatura": len(sem_assinatura),
+            },
+            "prazos": prazos,
+            "nao_lidos": nao_lidos,
+            "com_documento_novo": doc_novo,
+            "atribuidos_a_mim": meus,
+            "blocos_de_assinatura": blocos,
+            "documentos_sem_assinatura": sem_assinatura,
+            "_nota": (f"Documentos sem assinatura conferidos nos {min(verificar_documentos, len(processos))} "
+                      "processos mais recentes da caixa."),
+        })
+    except Exception as e:
+        return _error(str(e))
+
+
 @mcp.tool()
 async def sei_listar_processos_bloco_interno(
     id_bloco: str,
@@ -5743,6 +5989,8 @@ _TITULOS_TOOLS = {
     "sei_cancelar_disponibilizacao_bloco": "Cancelar disponibilização de bloco",
     "sei_pesquisar_blocos_assinatura": "Pesquisar blocos de assinatura",
     "sei_pesquisar_blocos_internos": "Pesquisar blocos internos",
+    "sei_listar_prazos": "Listar prazos da unidade",
+    "sei_listar_pendencias": "Listar pendências da unidade",
     "sei_criar_anotacao": "Criar anotação no processo",
     "sei_versao": "Versão do SEI e do wssei",
     "sei_listar_orgaos": "Listar órgãos",

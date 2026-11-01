@@ -124,7 +124,7 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 - *"Quais processos da unidade GPF estão sem movimentação há mais de 30 dias?"*
 - *"Compare o conteúdo dos documentos 2843449 e 2843450"*
 
-## Tools disponíveis (119)
+## Tools disponíveis (121)
 
 ### Sistema e metadados (3)
 
@@ -146,10 +146,12 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 | `sei_listar_usuarios` | Lista usuários (filtra por unidade ativa e nome) |
 | `sei_pesquisar_usuarios` | Busca usuários por palavra-chave no órgão |
 
-### Processos — consulta (11)
+### Processos — consulta (13)
 
 | Tool | Descrição |
 |------|-----------|
+| `sei_listar_pendencias` | Resumo do dia: prazos, não lidos, documento novo, atribuídos a mim, blocos de assinatura e documentos sem assinatura |
+| `sei_listar_prazos` | Processos com retorno programado ou marcador com data, vencidos ou vencendo |
 | `sei_listar_processos` | Lista caixa da unidade via scraper web (~23× mais rápido que REST). Suporta `apenas_meus`, `tipo`, `filtro` |
 | `sei_pesquisar_processos` | Pesquisa por texto, descrição, datas, unidade geradora, assunto ou grupo de acompanhamento |
 | `sei_consultar_processo` | **Híbrido**: REST (especificacao, assuntos, interessados, observacoes) + Web (lista de documentos da árvore) em paralelo |

@@ -62,6 +62,7 @@ class SEIClient:
         # (outra conversa, a tela do SEI…). Sem o cabeçalho, outra sessão da
         # mesma pessoa muda a unidade desta no meio de uma operação.
         self._unidade_escolhida: Optional[str] = None
+        self._nome_usuario: Optional[str] = None
         # Unidade de trabalho lembrada entre sessões (preferencias.py). É
         # aplicada logo após o login; se o SEI recusar, é descartada.
         from mcp_seipro import preferencias
@@ -445,6 +446,8 @@ class SEIClient:
         id_usuario = login_data.get("IdUsuario") or login_data.get("idUsuario")
         if id_usuario is not None:
             self._id_usuario = str(id_usuario)
+        if login_data.get("nome"):
+            self._nome_usuario = str(login_data.get("nome"))
         id_orgao_usuario = login_data.get("IdOrgao") or login_data.get("idOrgao")
         if id_orgao_usuario is not None:
             self._id_orgao_usuario = str(id_orgao_usuario)
