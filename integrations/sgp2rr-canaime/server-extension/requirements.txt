@@ -1,0 +1,2 @@
+# Extração de PDFs digitais. Dependência do servidor MCP existente.
+pypdf>=5,<7
