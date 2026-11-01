@@ -12,6 +12,8 @@ from io import BytesIO
 from typing import Callable, Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from sgp2rr_search import PesquisaSGP
+
 BASE = "areas/unidades/"
 SEARCH = BASE + "pesquisa.php"
 RESULT = BASE + "pesquisa_resultadoVULGO.php"
@@ -259,3 +261,15 @@ def registrar_ferramentas(mcp: object, backend_factory: Callable[[], Backend]) -
     def sgp_ler_anexo(codigo: int, indice: int, paginas: int = 5) -> dict:
         """Lê PDF autorizado do histórico, com limites de tamanho e páginas."""
         return service().ler_anexo(codigo, indice, paginas)
+
+    @mcp.tool()
+    def sgp_criterios_pesquisa() -> dict:
+        """Lista os 13 critérios reais da pesquisa (12 gerais e código)."""
+        return PesquisaSGP.criterios_disponiveis()
+
+    @mcp.tool()
+    def sgp_pesquisar_cadastro(
+        criterio: str, valor: str, unidade: str = "", limite: int = 30
+    ) -> dict:
+        """Pesquisa por nome, mãe, pai, CPF, endereço, código e demais campos do sistema."""
+        return PesquisaSGP(backend_factory()).buscar(criterio, valor, unidade, limite)
