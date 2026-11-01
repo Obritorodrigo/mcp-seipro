@@ -166,7 +166,7 @@ class AdapterTests(unittest.TestCase):
             url,
             "https://www.canaime.com.br/sgp2rr/fotos/presos_doc/0123456789abcdef.pdf",
         )
-        self.assertIs(kw["allow_redirects"], False)
+        self.assertIs(kw["follow_redirects"], False)
         self.assertEqual(kw["timeout"], 25.0)
         self.assertTrue(self.user.session.resposta.closed)
 
