@@ -130,3 +130,26 @@ async def test_documento_externo_usa_o_mesmo_fluxo(usar):
         id_documento="1", nivel_acesso="restrito", hipotese_legal="preparatorio", ctx=CTX)
     [(tipo, kw)] = c.alteracoes
     assert tipo == "X" and kw["id_hipotese_legal"] == "15"
+
+
+@pytest.mark.asyncio
+async def test_nome_exato_desfaz_ambiguidade(usar, monkeypatch):
+    # Caso real de sei.rr.gov.br: um nome contém o outro.
+    parecidas = [
+        {"id": "18", "nome": "Acesso à Informação", "baselegal": "Art.24 do Decreto Estadual Nº20.477-E"},
+        {"id": "22", "nome": "Acesso à Informações", "baselegal": "Art. 7º, §3º da Lei nº 12.527/11"},
+        {"id": "17", "nome": "Sigilo de Informação.", "baselegal": "Art. 24 do Decreto Nº 20.477/2016"},
+    ]
+    c = usar(Cliente())
+
+    async def pesquisar(filtro="", limit=50, start=0, nivel_acesso=""):
+        return {"hipoteses": parecidas}
+
+    monkeypatch.setattr(c, "pesquisar_hipoteses_legais", pesquisar)
+    await _alterar(nivel_acesso="restrito", hipotese_legal="acesso a informacao")
+    await _alterar(nivel_acesso="restrito", hipotese_legal="Acesso à Informações")
+    await _alterar(nivel_acesso="restrito", hipotese_legal="sigilo de informacao")  # ponto final ignorado
+    assert [kw["id_hipotese_legal"] for _, kw in c.alteracoes] == ["18", "22", "17"]
+
+    r = await _alterar(nivel_acesso="restrito", hipotese_legal="informacao")
+    assert "Mais de uma" in r["error"]  # sem nome exato, continua pedindo escolha

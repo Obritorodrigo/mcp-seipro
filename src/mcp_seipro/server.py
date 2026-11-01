@@ -3977,7 +3977,13 @@ async def _resolver_hipotese(client: SEIClient, nivel: str, hipotese: str) -> tu
     ]
     rotulo = "restrito" if nivel == "1" else "sigiloso"
     if hipotese:
-        termos = _normalizar_busca(hipotese).split()
+        alvo = _normalizar_busca(hipotese)
+        # Nome exato tem precedência: no SEI de Roraima, "Acesso à Informação"
+        # (id 18) e "Acesso à Informações" (id 22) se contêm mutuamente.
+        exatas = [o for o in opcoes if _normalizar_busca(o["nome"]).rstrip(".") == alvo.rstrip(".")]
+        if len(exatas) == 1:
+            return exatas[0]["id"], None
+        termos = alvo.split()
         achadas = [
             o for o in opcoes
             if all(t in _normalizar_busca(f"{o['nome']} {o['base_legal']}") for t in termos)
