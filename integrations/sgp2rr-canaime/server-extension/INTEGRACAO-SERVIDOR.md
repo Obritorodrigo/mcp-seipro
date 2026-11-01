@@ -1,108 +1,101 @@
-# Implantação da extensão SGP2RR no servidor MCP existente
+# Integração SGP2RR MCPServer — versão adaptada ao servidor real
 
-**Status:** código preparado e testado com mocks; NÃO implantado no servidor Canaimé.
+**Estado:** código pronto para homologação offline; nenhum arquivo da produção foi alterado.
 
-## 1. Estrutura da integração
+O diagnóstico realizado em 01/11/2026 identificou que:
 
-- sgp2rr_search.py: 13 critérios de pesquisa observados no formulário real.
-- sgp2rr_tools.py: oito ferramentas de consulta que serão registradas no MCP.
-- sgp2rr_integration.py: interface segura entre tools e a sessão já autenticada.
-- tests/: testes isolados, sem requisição ao Canaimé.
+- O script principal é sgp2rr_mcp.py (571 linhas na versão inspecionada).
+- O servidor utiliza mcp.server.mcpserver.MCPServer, não FastMCP.
+- As cinco ferramentas existentes usam o decorador @mcp.tool().
+- atual() devolve Sessao específica do token OAuth da requisição;
+  em modo online, consulta provedor.sessao_do_token(tok.token).
+- Sessao tem os métodos carregar(), _url(), lock e client httpx.Client.
+- renderizar(Pagina) é o formato textual das consultas existentes.
 
-O servidor existente, localizado no ambiente do operador, não está no GitHub.
-Por isso **não é correto presumir** os nomes de suas funções internas nem editar
-server.py sem inspecioná-lo. Essa é a única ligação que permanece dependente
-do código real do servidor.
+## Arquivos da extensão
 
-## 2. Instalar os arquivos de extensão em cópia de homologação
+- sgp2rr_search.py: 13 critérios de pesquisa, inclusive código.
+- sgp2rr_tools.py: registro de oito ferramentas de leitura.
+- sgp2rr_integration.py: allowlist de GET e leitura segura de PDF via httpx.stream.
+- sgp2rr_server_bridge.py: integra exatamente as funções atual(),
+  Sessao.carregar(), Sessao._url(), renderizar() e Sessao.client.
+- prepare_integration.py: prepara cópia do servidor com as oito ferramentas;
+  **não altera a produção**.
+- tests/: testes offline com dados inteiramente fictícios.
 
-No Ubuntu, **fora do diretório público de produção**, por exemplo:
+## 1. Baixar e testar em homologação
+
+No servidor Ubuntu, execute:
 
 ~~~bash
 set -e
 cd /home/ubuntu
 git clone --depth 1 --branch feat/sgp2rr-canaime-chatgpt \
-  https://github.com/Obritorodrigo/mcp-seipro.git sgp2rr-plugin-stage
-cd sgp2rr-plugin-stage/integrations/sgp2rr-canaime/server-extension
+  https://github.com/Obritorodrigo/mcp-seipro.git \
+  sgp2rr-plugin-stage
 
-python3 -m compileall -q sgp2rr_tools.py sgp2rr_search.py sgp2rr_integration.py
-python3 -m unittest discover -s tests -v
+cd sgp2rr-plugin-stage/integrations/sgp2rr-canaime/server-extension
+/home/ubuntu/sgp2rr-mcp/.venv/bin/python -m unittest discover -s tests -v
+
+STAGE_DIR="$(mktemp -d /home/ubuntu/sgp2rr-stage-XXXXXXXX)"
+/home/ubuntu/sgp2rr-mcp/.venv/bin/python prepare_integration.py \
+  --source /home/ubuntu/sgp2rr-mcp/sgp2rr_mcp.py \
+  --output-dir "$STAGE_DIR"
+
+echo "Cópia de homologação: $STAGE_DIR"
 ~~~
 
-O comando não instala nada no servidor nem reinicia serviços. Evite adicionar
-quaisquer credenciais ou registros do SGP ao clone público.
+O comando pressupõe que a pasta sgp2rr-plugin-stage ainda não exista.
+Se existir, use outra pasta de clone; não sobrescreva nada sem revisão.
 
-## 3. Conectar ao FastMCP existente
+Este procedimento não reinicia a unidade systemd, não altera o ambiente
+virtual, não instala bibliotecas, não usa logins nem lê dados de custodiados.
 
-Inspecione a função que recupera o usuário autenticado e a sessão HTTP no
-servidor em /home/ubuntu/sgp2rr-mcp. Recupere a sessão **da identidade OAuth
-da requisição atual**, nunca uma sessão global ou uma conta de serviço.
+## 2. Integração automática na CÓPIA
 
-Este é o bloco de integração a inserir NA INICIALIZAÇÃO do FastMCP existente
-(antes do mcp.run), ajustando SOMENTE os nomes internos do servidor:
+prepare_integration.py valida a estrutura sintática e os cinco decoradores
+existentes e injeta, **após a última ferramenta do arquivo**, o seguinte
+bloco (apenas na cópia):
 
 ~~~python
-# Ajustar sys.path ou instalar o módulo no ambiente Python do SGP2RR.
-from sgp2rr_integration import ClienteAutenticado, integrar_sgp2rr
-
-def obter_cliente_atual() -> ClienteAutenticado:
-    # ADAPTAR para as funções reais do sgp2rr-mcp.
-    # Deve recuperar a sessão web do usuário OAuth da chamada MCP EM CURSO.
-    estado = recuperar_estado_sgp_da_requisicao_mcp()
-    if estado is None or not estado.autenticado:
-        raise PermissionError("Sessão SGP2RR não autenticada")
-
-    return ClienteAutenticado(
-        # Funções já implementadas no servidor para ler páginas.
-        # DEVEM devolver a mesma representação textual de sgp_abrir_pagina.
-        abrir=lambda caminho: estado.abrir_pagina(caminho),
-
-        # A extensão faz a pesquisa por GET direto nos endpoints já mapeados;
-        # não depende do estado do último formulário nem executa POST.
-
-        # A MESMA sessão autenticada; é opcional até ativar leitura PDF.
-        # Não criar requests.Session nova: não carregaria o login atual.
-        sessao_http=estado.sessao_http,
-    )
-
-integrar_sgp2rr(mcp, obter_cliente_atual)
+from sgp2rr_server_bridge import registrar_sgp2rr_no_servidor as _registrar_sgp2rr
+_registrar_sgp2rr(mcp=mcp, atual=atual, renderizar=renderizar)
 ~~~
 
-ATENÇÃO: recuperar_estado_sgp_da_requisicao_mcp(), estado.abrir_pagina(),
-estado.autenticado e estado.sessao_http são
-**nomes ilustrativos**. Não basta copiar esse bloco sem vinculá-los à
-implementação real. Se o servidor usa funções ASYNC/await, as oito tools
-desta primeira versão ainda são SÍNCRONAS e exigem adaptação do wrapper;
-não execute coroutines com asyncio.run() dentro de um event loop ativo.
+sgp2rr_server_bridge.py registra oito ferramentas novas no MCPServer já
+instanciado. A sessão é obtida DENTRO da requisição MCP (não no startup).
+A pesquisa usa endpoints GET fixos; não depende de sessao.ultima ou da
+posição do formulário ativo. PDF usa o httpx.Client da mesma Sessao e
+bloqueia redirecionamentos.
 
-## 4. Verificações obrigatórias antes da ativação
+## 3. Verificações antes de qualquer deploy
 
-1. Executar testes locais na cópia de homologação.
-2. Confirmar que todas as chamadas passam pela autenticação OAuth de cada
-   usuário e não reutilizam a sessão de outro usuário.
-3. Conferir que a pesquisa direta navega apenas pelos endpoints GET
-   pesquisa_resultadoVULGO.php e Ficha_Menu.php. Nenhum POST de gravação.
-4. Confirmar que a sessão HTTP para PDFs é a mesma do usuário e que redirects
-   externos são recusados (o módulo usa allow_redirects=False).
-5. Não registrar valores de CPF, RG, nomes, endereço, query string GET, cookies,
-   respostas e PDFs nos logs do aplicativo, proxy ou serviços de monitoramento.
-6. Executar leitura de teste para cada filtro com registros sintéticos ou
-   devidamente autorizados, e validar a paginação dos resultados.
-7. Conferir a compatibilidade dos módulos com a versão do FastMCP em uso.
-8. Após homologação, efetuar backup do servidor e preparar rollback antes de
-   qualquer reinício do serviço sgp2rr-mcp.
+1. Conferir os 30 testes automatizados (mocks) e o parse do script real.
+2. Validar as novas ferramentas em um serviço MCP isolado de homologação,
+   sem usar a porta ou o service de produção.
+3. Homologar pesquisa por nome, mãe, pai, CPF, endereço e código com
+   cadastro de teste/autorização institucional.
+4. Testar dois tokens OAuth diferentes para confirmar isolamento e revogação.
+5. Confirmar limites, MIME e acesso a PDF da sessão correta; para extração,
+   a dependência pypdf precisa estar presente no ambiente homologado.
+6. Verificar que nenhum parâmetro GET sensível é registrado no proxy,
+   trace de exceptions ou logs de requisições HTTP.
+7. Testar rollback a partir de backup antes de qualquer modificação de produção.
+8. Registrar, sem dados pessoais, quais ferramentas estão disponíveis após
+   a homologação.
 
-## 5. Resultado esperado
+A opção de busca por foto consta no formulário, mas sua semântica ainda
+não foi homologada. O adaptador não exporta imagens.
 
-O servidor deverá passar de cinco ferramentas atualmente observadas para
-TREZE (cinco existentes + oito de extensão), se não houver nomes duplicados:
+## 4. Produção
 
-- sgp_status, sgp_abrir_pagina, sgp_seguir_link, sgp_ver_parte,
-  sgp_enviar_formulario (ferramentas existentes);
-- sgp_pesquisar_reeducando, sgp_consultar_ficha, sgp_consultar_historico,
-  sgp_consultar_certidao, sgp_listar_anexos, sgp_ler_anexo,
-  sgp_criterios_pesquisa, sgp_pesquisar_cadastro (extensão).
+Nenhuma implantação em produção é incluída neste procedimento. Antes
+de copiar arquivos para /home/ubuntu/sgp2rr-mcp ou reiniciar
+sgp2rr-mcp.service, revisar o diff da cópia, o ponto de inicialização do
+MCPServer e a concorrência do gerenciador OAuth. A montagem foi feita
+com base na estrutura relatada do código, e não na leitura integral
+do sgp2rr_mcp.py.
 
-Esse resultado **não foi observado em produção**. Para instalação precisa,
-é indispensável revisar a implementação atual de server.py e do gestor de
-sessões OAuth no servidor sgp2rr-mcp.
+**Resultado esperado após homologação e deploy futuro:** 13 ferramentas
+(5 existentes + 8 novas). Não afirmar que as novas ferramentas já estão
+ativas enquanto não aparecerem na descoberta MCP da sessão.
