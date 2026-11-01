@@ -4019,11 +4019,17 @@ async def _alterar_nivel_documento(client, id_documento, descricao, nivel_acesso
             hipotese, escolha = await _resolver_hipotese(client, nivel, hipotese)
             if escolha:
                 return _json(escolha)
+    # Como na assinatura: o SEI só altera documento de processo aberto na
+    # unidade ativa. Ativa a unidade geradora se o usuário tiver acesso a ela
+    # (melhor-esforço; sem acesso, o próprio SEI explica a recusa).
+    unidade_ativada = None if externo else await _ativar_unidade_geradora(client, doc_id)
     metodo = client.alterar_documento_externo if externo else client.alterar_documento_interno
     result = await metodo(
         id_documento=doc_id, descricao=descricao, nivel_acesso=nivel,
         id_hipotese_legal=hipotese, **extra,
     )
+    if isinstance(result, dict) and unidade_ativada:
+        result["_unidade_ativada"] = unidade_ativada
     if isinstance(result, dict) and nivel:
         result["nivel_acesso"] = nivel
         result["nivel_acesso_descricao"] = access_control.ROTULOS.get(nivel, nivel)

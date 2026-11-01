@@ -153,3 +153,20 @@ async def test_nome_exato_desfaz_ambiguidade(usar, monkeypatch):
 
     r = await _alterar(nivel_acesso="restrito", hipotese_legal="informacao")
     assert "Mais de uma" in r["error"]  # sem nome exato, continua pedindo escolha
+
+
+@pytest.mark.asyncio
+async def test_ativa_unidade_do_documento_antes_de_alterar(usar, monkeypatch):
+    # Visto ao vivo: sessão no Controle Interno → "Processo ... não possui
+    # andamento aberto na unidade SEJUC/DEPLAF/CI".
+    ativadas = []
+
+    async def ativar(client, doc_id):
+        ativadas.append(doc_id)
+        return "110001335"
+
+    monkeypatch.setattr(srv, "_ativar_unidade_geradora", ativar)
+    usar(Cliente(nivel_atual="1"))
+    r = await _alterar(nivel_acesso="publico")
+    assert ativadas == ["27113158"]
+    assert r["_unidade_ativada"] == "110001335"
