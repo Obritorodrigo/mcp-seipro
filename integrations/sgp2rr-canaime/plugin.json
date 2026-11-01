@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "author": {
+    "name": "Rodrigo Brito"
+  },
+  "description": "Integração privada ao SGP2RR (Canaimé) via servidor MCP remoto existente, com autenticação individual e consultas autorizadas.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "capabilities": [],
+        "category": "Productivity",
+        "defaultPrompt": "Conecte ao SGP2RR e mostre apenas as áreas e ferramentas disponíveis para minha sessão, sem alterar registros.",
+        "developerName": "Rodrigo Brito",
+        "displayName": "SGP2RR — Canaimé",
+        "longDescription": "Conecta o ChatGPT ao servidor MCP privado SGP2RR já existente. Permite navegar e consultar informações a que o usuário autenticado tenha acesso, segundo as ferramentas disponibilizadas pelo servidor. Não armazena credenciais no plugin e requer autorização explícita para alterações.",
+        "shortDescription": "Acesso autorizado ao SGP2RR"
+      }
+    }
+  },
+  "homepage": "https://www.canaime.com.br/sgp2rr/",
+  "name": "sgp2rr-canaime",
+  "version": "0.1.0"
+}
