@@ -8,6 +8,17 @@ MCP Server do **[SEI Pro](https://sei-pro.github.io/sei-pro/)** para o SEI (Sist
 
 **116 tools** para gerenciar processos, documentos, tramitação, assinatura, blocos, marcadores, acompanhamento, credenciamento, modelos e mais em qualquer instância do SEI. Cobertura completa da API mod-wssei v2 oficial ([pengovbr/mod-wssei](https://github.com/pengovbr/mod-wssei)) **mais um scraper HTTP do frontend web** que dá ganhos de até **23×** em operações de listagem (`sei_listar_processos` cai de ~14 s para ~600 ms warm).
 
+## Integração experimental SGP2RR — Canaimé (separada do SEI Pro)
+
+A integração **SGP2RR/Canaimé** é independente do serviço SEI Pro. O código e a documentação de homologação encontram-se em [`integrations/sgp2rr-canaime/`](integrations/sgp2rr-canaime/).
+
+A extensão propõe oito ferramentas adicionais para um servidor MCPServer SGP2RR já existente: pesquisa por 13 critérios, ficha, histórico, certidão e anexos PDF. O usuário do servidor Ubuntu confirmou **30 testes unitários aprovados** e **13 ferramentas registradas** (5 originais + 8 novas) no carregamento da cópia de homologação, em **01/11/2026**.
+
+**Não está implantada em produção.** O serviço original permanece separado e a ativação exige homologação OAuth multiusuário, revisão de logs de dados pessoais, testes funcionais e plano de rollback.
+
+- [Instalação e staging seguro](integrations/sgp2rr-canaime/server-extension/INTEGRACAO-SERVIDOR.md)
+- [Histórico técnico de validação](integrations/sgp2rr-canaime/docs/verification.md)
+
 ## Instalação
 
 ### Opção 1: Claude Desktop (extensão com um clique)
