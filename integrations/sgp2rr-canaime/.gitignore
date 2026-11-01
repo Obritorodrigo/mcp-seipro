@@ -1,0 +1,14 @@
+# Private authentication and operational data
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.pem
+*.key
+tokens/
+sessions/
+exports/
+cookies/
+__pycache__/
