@@ -697,6 +697,24 @@ class SEIClient:
             })
         return payload
 
+    async def copiar_metadados_documento_interno(
+        self, origem: dict, id_destino: str, descricao: str = ""
+    ) -> dict:
+        """Grava no documento `id_destino` os metadados da consulta `origem`.
+
+        Usa o mesmo payload completo da alteração (nível, hipótese, grau,
+        observação, assuntos, interessados, destinatários). Serve à conversão
+        de documento: a criação não aceita hipótese legal nem assuntos.
+        """
+        payload = self._payload_alteracao(origem, descricao, externo=False)
+        resp = await self._request(
+            "POST", f"/documento/interno/{id_destino}/alterar", data=payload
+        )
+        data = resp.json()
+        if not data.get("sucesso"):
+            raise Exception(f"Erro ao copiar metadados: {data.get('mensagem')}")
+        return data.get("data", {"mensagem": data.get("mensagem")})
+
     async def alterar_documento_interno(
         self,
         id_documento: str,

@@ -124,7 +124,7 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 - *"Quais processos da unidade GPF estão sem movimentação há mais de 30 dias?"*
 - *"Compare o conteúdo dos documentos 2843449 e 2843450"*
 
-## Tools disponíveis (118)
+## Tools disponíveis (119)
 
 ### Sistema e metadados (3)
 
@@ -210,10 +210,11 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 | `sei_listar_assinaturas` | Lista assinaturas de um documento |
 | `sei_listar_blocos_documento` | Lista blocos de assinatura do documento |
 
-### Documentos — escrita (10)
+### Documentos — escrita (11)
 
 | Tool | Descrição |
 |------|-----------|
+| `sei_converter_documento` | Converte documento para outro tipo (ex.: Despacho → Ofício), copiando conteúdo e metadados |
 | `sei_criar_documento` | Cria documento interno vazio |
 | `sei_criar_documento_externo` | Cria documento externo — upload por `arquivo_base64` (+`nome_arquivo`) ou `arquivo_path` |
 | `sei_alterar_documento_interno` | Altera metadados de documento interno |

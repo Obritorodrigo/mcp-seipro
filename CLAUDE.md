@@ -177,6 +177,11 @@ Funciona com qualquer instância SEI que tenha o módulo mod-wssei v2 instalado.
 - Busca sem acento/ordem (`_normalizar_busca`) também em `sei_pesquisar_tipos_documento` (lista inteira em cache 1 h) e `sei_listar_unidades(filtro=)`. `_resolver_processo` tenta o separador do dígito trocado (`2026-08` ↔ `2026.08`)
 - `sei_consultar_documento_interno`: metadados do documento gerado (assuntos, interessados, destinatários, observação), que antes não tinham tool
 
+### Converter documento (`sei_converter_documento`)
+- O SEI não troca o tipo de um documento. A tool cria outro do tipo pedido no mesmo processo e copia o conteúdo por PAPEL da seção (`_papel_secao`: principal | destinatario | assunto | vocativo | outra), não por `idSecaoModelo` — modelos de tipos diferentes têm ids diferentes (em RR, Despacho 461–470, Ofício 3157–3167). Papel sai de `PrincipalSecaoDocumento`, dos marcadores do modelo (`@..._destinatario@`, `@vocativo_destinatario@`) e do texto ("Ao Senhor", "Assunto:", parágrafo curto terminado em vírgula)
+- Se o destino tem seção de vocativo e a origem não, o primeiro parágrafo curto terminado em "," do corpo vira vocativo. Seções do destino com marcador `@x@` ou "Digite aqui" que ficaram sem conteúdo são limpas. Seções dinâmicas/somente leitura nunca são enviadas
+- A criação não aceita hipótese legal nem assuntos: depois do conteúdo, `copiar_metadados_documento_interno` grava no novo documento o payload completo da ORIGEM (nível, hipótese, assuntos, interessados, destinatários, observação). O original não é excluído (a API não tem rota). Testes: `tests/test_converter_documento.py`
+
 ### Auditoria (`auditoria.py`)
 - Toda tool de escrita (verbo fora de `_ANNOT_VERBOS_LEITURA`) é envolvida em `_aplicar_auditoria()` e grava uma linha JSON em `SEI_AUDITORIA_LOG` (padrão `/var/lib/sei-pro/auditoria.jsonl`, 0600): ts, usuário SEI, apelido da sessão (sha256 do sid, 12 hex), tool, argumentos, ok/erro, ms
 - Conteúdo e segredo nunca entram (`secoes`, `conteudo`, `arquivo_base64`, `senha`…); textos são truncados. `SEI_AUDITORIA=0` desliga. Rotação: logrotate do host. Testes: `tests/test_auditoria.py`

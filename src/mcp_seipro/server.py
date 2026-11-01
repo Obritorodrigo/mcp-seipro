@@ -1477,6 +1477,186 @@ async def sei_criar_documento(
         return _error(str(e))
 
 
+_RE_TAGS = re.compile(r"<[^>]+>")
+_RE_MARCADOR_MODELO = re.compile(r"@[a-z_]+@")
+_RE_PARAGRAFO = re.compile(r"<p\b[^>]*>.*?</p>", re.S | re.I)
+_INICIO_DESTINATARIO = ("ao senhor", "a senhora", "aos senhores", "as senhoras",
+                        "a sua excelencia", "ao excelentissimo", "a excelentissima",
+                        "ao ilustrissimo", "a ilustrissima", "ao sr", "a sra")
+
+
+def _texto_secao(html_secao: str) -> str:
+    return _normalizar_busca(_RE_TAGS.sub(" ", html_secao))
+
+
+def _papel_secao(secao: dict, conteudo: str) -> str:
+    """Papel de uma seção num modelo de documento do SEI.
+
+    principal | assunto | destinatario | vocativo | outra. Modelos de tipos
+    diferentes usam ids de seção diferentes (Despacho 461–470, Ofício
+    3157–3167 em Roraima), então o papel sai do conteúdo e dos marcadores.
+    """
+    if secao.get("PrincipalSecaoDocumento") == "S":
+        return "principal"
+    bruto = conteudo.lower()
+    texto = _texto_secao(conteudo)
+    if "@vocativo" in bruto:
+        return "vocativo"
+    if "_destinatario@" in bruto or texto.startswith(_INICIO_DESTINATARIO):
+        return "destinatario"
+    if texto.startswith("assunto"):
+        return "assunto"
+    paragrafos = [p for p in _RE_PARAGRAFO.findall(conteudo) if _texto_secao(p)]
+    if len(paragrafos) == 1 and texto.endswith(",") and len(texto) <= 60:
+        return "vocativo"
+    return "outra"
+
+
+def _secoes_editaveis(resultado: dict) -> list[tuple[dict, str]]:
+    saida = []
+    for secao in resultado.get("secoes") or []:
+        if not isinstance(secao, dict):
+            continue
+        if secao.get("DinamicaSecaoDocumento") == "S" or secao.get("somenteLeitura") == "S":
+            continue
+        saida.append((secao, html.unescape(str(secao.get("conteudo") or ""))))
+    return saida
+
+
+def _separar_vocativo(corpo: str) -> tuple[str, str]:
+    """Tira do início do corpo um parágrafo de vocativo ("Senhor Secretário,")."""
+    for paragrafo in _RE_PARAGRAFO.findall(corpo):
+        texto = _texto_secao(paragrafo)
+        if not texto:
+            continue
+        if texto.endswith(",") and len(texto) <= 60:
+            return paragrafo, corpo.replace(paragrafo, "", 1)
+        break
+    return "", corpo
+
+
+async def _resolver_tipo_documento(client: SEIClient, tipo: str) -> tuple[str, str]:
+    """(id_serie, nome) a partir do id ou do nome do tipo de documento."""
+    tipo = str(tipo or "").strip()
+    r = await _tipos_documento(client, filtro="" if tipo.isdigit() else tipo, limit=200)
+    tipos = r.get("tipos") or []
+    if tipo.isdigit():
+        return tipo, next((t.get("nome", "") for t in tipos if str(t.get("id")) == tipo), "")
+    alvo = _normalizar_busca(tipo)
+    exatos = [t for t in tipos if _normalizar_busca(t.get("nome", "")) == alvo]
+    candidatos = exatos or tipos
+    if len(candidatos) == 1:
+        return str(candidatos[0]["id"]), candidatos[0].get("nome", "")
+    raise ValueError(
+        f"Tipo de documento {tipo!r} " + ("não encontrado." if not tipos else "ambíguo: ")
+        + ", ".join(f"{t.get('nome')} (id {t.get('id')})" for t in tipos[:10])
+    )
+
+
+@mcp.tool()
+async def sei_converter_documento(
+    id_documento: str,
+    tipo_destino: str,
+    descricao: str = "",
+    ctx: Context = None,
+) -> str:
+    """Converte um documento interno em outro tipo (ex.: Despacho → Ofício).
+
+    O SEI não troca o tipo de um documento existente. Esta tool cria, no mesmo
+    processo, um documento do tipo `tipo_destino` e copia:
+    - destinatário, assunto, vocativo e corpo para as seções equivalentes do
+      novo modelo (pelo papel de cada seção, não pelo id);
+    - os metadados: descrição, nível de acesso, hipótese legal, assuntos,
+      interessados, destinatários e observação.
+    Marcadores do modelo novo que ficarem sem conteúdo (ex.: @vocativo_destinatario@)
+    são limpos. O documento ORIGINAL NÃO é excluído (a API do SEI não permite):
+    se não servir mais, exclua-o pela interface do SEI.
+
+    Parâmetros:
+    - id_documento: número SEI ou id interno do documento de origem
+    - tipo_destino: id ou nome do tipo (ex.: "Ofício", "290")
+    - descricao: descrição do novo documento (vazio = a da origem)
+    """
+    try:
+        client = _get_client(ctx)
+        doc_id, _ = await _resolver_documento(client, id_documento)
+        origem_meta = await client.consultar_documento_interno(doc_id)
+        id_proc = str(origem_meta.get("protocolo") or "")
+        if not id_proc:
+            return _error("Não foi possível identificar o processo do documento de origem.")
+        id_serie, nome_tipo = await _resolver_tipo_documento(client, tipo_destino)
+
+        await _ativar_unidade_geradora(client, doc_id)
+        origem_secoes = await client.listar_secao_documento(doc_id)
+
+        nova_descricao = descricao or html.unescape(str(origem_meta.get("descricao") or ""))
+        criado = await client.criar_documento_interno(
+            id_procedimento=id_proc, id_serie=id_serie, descricao=nova_descricao, nivel_acesso="0",
+        )
+        novo_id = str(criado.get("idDocumento") or "")
+        novo_numero = str(criado.get("protocoloDocumentoFormatado") or "")
+        resultado = {
+            "documento_original": {"id": str(doc_id), "nome": html.unescape(str(origem_meta.get("nomeDocumento") or ""))},
+            "novo_documento": {"id": novo_id, "numero_sei": novo_numero, "tipo": nome_tipo},
+        }
+
+        # Conteúdo: por papel da seção
+        por_papel: dict[str, str] = {}
+        nao_copiadas = []
+        for secao, conteudo in _secoes_editaveis(origem_secoes):
+            papel = _papel_secao(secao, conteudo)
+            if not _texto_secao(conteudo):
+                continue
+            if papel in por_papel or papel == "outra":
+                nao_copiadas.append({"idSecaoModelo": secao.get("idSecaoModelo"), "papel": papel})
+                continue
+            por_papel[papel] = conteudo
+
+        destino_secoes = await client.listar_secao_documento(novo_id)
+        papeis_destino = {_papel_secao(s, c) for s, c in _secoes_editaveis(destino_secoes)}
+        if "vocativo" in papeis_destino and "vocativo" not in por_papel and "principal" in por_papel:
+            vocativo, resto = _separar_vocativo(por_papel["principal"])
+            if vocativo:
+                por_papel["vocativo"], por_papel["principal"] = vocativo, resto
+
+        envio, copiadas, limpas = [], [], []
+        for secao, conteudo in _secoes_editaveis(destino_secoes):
+            papel = _papel_secao(secao, conteudo)
+            if papel in por_papel:
+                envio.append({"idSecaoModelo": secao["idSecaoModelo"], "conteudo": por_papel.pop(papel)})
+                copiadas.append(papel)
+            elif _RE_MARCADOR_MODELO.search(conteudo) or "digite aqui" in conteudo.lower():
+                envio.append({"idSecaoModelo": secao["idSecaoModelo"],
+                              "conteudo": '<p class="Texto_Alinhado_Esquerda">&nbsp;</p>'})
+                limpas.append(secao["idSecaoModelo"])
+        nao_copiadas += [{"papel": p} for p in por_papel]  # sem seção equivalente no destino
+
+        if envio:
+            gravado = json.loads(await sei_editar_secao(id_documento=novo_id, secoes=envio, ctx=ctx))
+            if isinstance(gravado, dict) and gravado.get("error"):
+                resultado["erro_conteudo"] = gravado["error"]
+        resultado["secoes_copiadas"] = copiadas
+        if limpas:
+            resultado["marcadores_limpos"] = limpas
+        if nao_copiadas:
+            resultado["nao_copiadas"] = nao_copiadas
+
+        try:
+            await client.copiar_metadados_documento_interno(origem_meta, novo_id, nova_descricao)
+            resultado["metadados_copiados"] = True
+        except Exception as e:
+            resultado["metadados_copiados"] = False
+            resultado["erro_metadados"] = str(e)
+
+        resultado["_aviso"] = (
+            "O documento original não foi excluído (a API do SEI não permite). "
+            "Confira o novo documento e, se o original não servir mais, exclua-o pela interface do SEI."
+        )
+        return _json(resultado)
+    except Exception as e:
+        return _error(str(e))
+
+
 @mcp.tool()
 async def sei_listar_secoes(
     id_documento: str,
@@ -2764,6 +2944,60 @@ async def sei_assinar_documento(
         return _error(str(e))
 
 
+async def _tipos_documento(client: SEIClient, filtro: str = "", favoritos: str = "",
+                           aplicabilidade: str = "", limit: int = 50, pagina: int = 0) -> dict:
+    """Busca de tipos de documento (nativa + varredura sem acento). Ver a tool."""
+    result = await client.pesquisar_tipos_documento(
+        filtro=filtro,
+        favoritos=favoritos,
+        aplicabilidade=aplicabilidade,
+        limit=limit,
+        start=pagina,
+    )
+    termos = _normalizar_busca(filtro).split()
+    if not termos or pagina:
+        return result
+
+    # A busca do SEI é por substring exata e sensível a acento ("Oficio"
+    # não acha "Ofício"). Completa com a lista inteira comparada
+    # normalizada — lida uma vez e mantida no cache do cliente (1 h).
+    chave = f"tipos_documento:{favoritos}:{aplicabilidade}"
+    todos = client._cache_get(chave)
+    if todos is None:
+        todos, ids = [], set()
+        for pg in range(10):
+            r = await client.pesquisar_tipos_documento(
+                favoritos=favoritos, aplicabilidade=aplicabilidade, limit=500, start=pg
+            )
+            itens = r.get("tipos") or []
+            novos = [t for t in itens if str(t.get("id")) not in ids]
+            ids.update(str(t.get("id")) for t in novos)
+            todos.extend(novos)
+            if len(itens) < 500 or not novos:
+                break
+        client._cache_set(chave, todos)
+
+    vistos = {str(t.get("id")) for t in result.get("tipos") or []}
+    extras = [
+        t for t in todos
+        if str(t.get("id")) not in vistos
+        and all(x in _normalizar_busca(t.get("nome", "")) for x in termos)
+    ]
+    tipos, vistos = [], set()
+    for t in list(result.get("tipos") or []) + extras:
+        ident = str(t.get("id"))
+        if ident not in vistos and all(x in _normalizar_busca(t.get("nome", "")) for x in termos):
+            vistos.add(ident)
+            tipos.append(t)
+    return ({
+        "tipos": tipos[:limit],
+        "pagina_atual": 0,
+        "itens_pagina": min(len(tipos), limit),
+        "total_itens": len(tipos),
+        "tem_proxima": len(tipos) > limit,
+    })
+
+
 @mcp.tool()
 async def sei_pesquisar_tipos_documento(
     filtro: str = "",
@@ -2789,55 +3023,7 @@ async def sei_pesquisar_tipos_documento(
     """
     try:
         client = _get_client(ctx)
-        result = await client.pesquisar_tipos_documento(
-            filtro=filtro,
-            favoritos=favoritos,
-            aplicabilidade=aplicabilidade,
-            limit=limit,
-            start=pagina,
-        )
-        termos = _normalizar_busca(filtro).split()
-        if not termos or pagina:
-            return _json(result)
-
-        # A busca do SEI é por substring exata e sensível a acento ("Oficio"
-        # não acha "Ofício"). Completa com a lista inteira comparada
-        # normalizada — lida uma vez e mantida no cache do cliente (1 h).
-        chave = f"tipos_documento:{favoritos}:{aplicabilidade}"
-        todos = client._cache_get(chave)
-        if todos is None:
-            todos, ids = [], set()
-            for pg in range(10):
-                r = await client.pesquisar_tipos_documento(
-                    favoritos=favoritos, aplicabilidade=aplicabilidade, limit=500, start=pg
-                )
-                itens = r.get("tipos") or []
-                novos = [t for t in itens if str(t.get("id")) not in ids]
-                ids.update(str(t.get("id")) for t in novos)
-                todos.extend(novos)
-                if len(itens) < 500 or not novos:
-                    break
-            client._cache_set(chave, todos)
-
-        vistos = {str(t.get("id")) for t in result.get("tipos") or []}
-        extras = [
-            t for t in todos
-            if str(t.get("id")) not in vistos
-            and all(x in _normalizar_busca(t.get("nome", "")) for x in termos)
-        ]
-        tipos, vistos = [], set()
-        for t in list(result.get("tipos") or []) + extras:
-            ident = str(t.get("id"))
-            if ident not in vistos and all(x in _normalizar_busca(t.get("nome", "")) for x in termos):
-                vistos.add(ident)
-                tipos.append(t)
-        return _json({
-            "tipos": tipos[:limit],
-            "pagina_atual": 0,
-            "itens_pagina": min(len(tipos), limit),
-            "total_itens": len(tipos),
-            "tem_proxima": len(tipos) > limit,
-        })
+        return _json(await _tipos_documento(client, filtro, favoritos, aplicabilidade, limit, pagina))
     except Exception as e:
         return _error(str(e))
 
@@ -5306,6 +5492,7 @@ _TITULOS_TOOLS = {
     "sei_pesquisar_textos_padrao": "Pesquisar textos padrão",
     "sei_consultar_documento_externo": "Consultar documento externo",
     "sei_consultar_documento_interno": "Consultar documento interno",
+    "sei_converter_documento": "Converter documento para outro tipo",
     "sei_alterar_documento_interno": "Alterar metadados de documento interno",
     "sei_alterar_documento_externo": "Alterar documento externo",
     "sei_pesquisar_tipos_conferencia": "Pesquisar tipos de conferência",
