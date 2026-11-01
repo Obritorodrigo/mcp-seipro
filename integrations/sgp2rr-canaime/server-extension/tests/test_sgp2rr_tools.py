@@ -131,8 +131,10 @@ class ToolsTest(unittest.TestCase):
                 return decorator
         mcp = FakeMCP()
         registrar_ferramentas(mcp, lambda: FakeBackend())
-        self.assertEqual(len(mcp.tools), 6)
+        self.assertEqual(len(mcp.tools), 8)
         self.assertIn("sgp_ler_anexo", mcp.tools)
+        self.assertIn("sgp_criterios_pesquisa", mcp.tools)
+        self.assertIn("sgp_pesquisar_cadastro", mcp.tools)
 
 
 if __name__ == "__main__":
