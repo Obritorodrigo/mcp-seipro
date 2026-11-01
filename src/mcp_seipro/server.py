@@ -1719,9 +1719,10 @@ async def sei_gerar_referencia(
     numero_sei: str,
     ctx: Context = None,
 ) -> str:
-    """Gera o HTML de referência (hiperlink dinâmico) para um documento SEI.
+    """Gera o HTML de referência (hiperlink dinâmico) para um documento ou processo SEI.
 
-    Dado um número SEI (ex: 2599818), resolve o id interno e retorna
+    Aceita número SEI de documento (ex: 2599818) ou número de processo
+    (ex: 26101.018680/2026.11). Para documento, resolve o id interno e retorna
     o snippet HTML pronto para inserir no conteúdo de um documento.
 
     O SEI renderiza isso como link clicável na interface web.
@@ -1731,6 +1732,19 @@ async def sei_gerar_referencia(
     """
     try:
         client = _get_client(ctx)
+        numero_sei = numero_sei.strip()
+        if "/" in numero_sei:
+            # Número de PROCESSO: o link usa o id do processo e o número
+            # exatamente como o SEI o formata.
+            alvo = await _vincular_referencias(client, numero_sei, {}, vinculados := [], [])
+            if not vinculados:
+                return _error(f"Processo {numero_sei} não encontrado.")
+            return _json({
+                "numero_processo": vinculados[0]["numero"],
+                "id_procedimento": vinculados[0]["id"],
+                "html": alvo,
+                "uso": f"...Processo SEI n&ordm; {alvo}...",
+            })
         doc_id, _ = await _resolver_documento(client, numero_sei)
         snippet = html_referencia_sei(doc_id, numero_sei)
         return _json({
@@ -1796,6 +1810,105 @@ async def sei_estilos(categoria: str = "", ctx: Context = None) -> str:
         return _error(str(e))
 
 
+# ---------------------------------------------------------------------------
+# Links automáticos para números de processo e de documento citados no texto
+# ---------------------------------------------------------------------------
+# Número de processo: 5 dígitos . 6 dígitos / ano, com dígito após "-" ou "."
+_RE_NUM_PROCESSO = re.compile(r"(?<![\w/.-])(\d{5}\.\d{6}/\d{4}[-.]\d{2})(?![\w/-]|\.\d)")
+# Número SEI de documento só quando citado como tal: "ep.", "SEI nº", "evento nº"…
+_RE_NUM_DOCUMENTO = re.compile(
+    r"((?:\bep\.?|\beps\.?|\bevento(?:\s+n[º°o]\.?)?|\bSEI(?:\s+n[º°o]\.?)?|\bdocumento\s+SEI(?:\s+n[º°o]\.?)?)\s*)(\d{6,9})\b",
+    re.I,
+)
+_RE_TAG_OU_TEXTO = re.compile(r"(<[^>]+>)")
+
+
+def _ancora_sei(id_protocolo: str, texto: str) -> str:
+    return ('<span contenteditable="false" style="text-indent:0;">'
+            f'<a class="ancoraSei" id="lnkSei{id_protocolo}" style="text-indent:0;">{texto}</a></span>')
+
+
+async def _vincular_referencias(client: SEIClient, conteudo: str, cache: dict,
+                                vinculadas: list, nao_resolvidas: list) -> str:
+    """Transforma números de processo e de documento citados em links do SEI.
+
+    Só mexe em TEXTO fora de <a>…</a> (âncoras existentes ficam como estão).
+    Documento só quando o número vem citado ("ep. 24837023", "SEI nº …") e
+    resolvido pelo número SEI direto no banco — nunca tratado como id interno.
+    Processo: o texto do link é o número exatamente como o SEI o formata
+    (o EditorRN descarta a âncora se o texto não bater com o protocolo).
+    """
+    async def processo(numero: str):
+        chave = ("P", numero)
+        if chave not in cache:
+            cache[chave] = None
+            for candidato in _variantes_protocolo(numero):
+                try:
+                    proc = await client.consultar_processo(candidato)
+                except Exception:
+                    continue
+                if proc and proc.get("IdProcedimento"):
+                    cache[chave] = (str(proc["IdProcedimento"]),
+                                    str(proc.get("ProtocoloProcedimentoFormatado") or candidato))
+                    break
+        return cache[chave]
+
+    async def documento(numero: str):
+        chave = ("D", numero)
+        if chave not in cache:
+            cache[chave] = None
+            try:
+                doc = await client.consultar_documento_interno_formatado(numero)
+                if doc and doc.get("idDocumento"):
+                    cache[chave] = (str(doc["idDocumento"]), numero)
+            except Exception:
+                pass
+        return cache[chave]
+
+    partes = _RE_TAG_OU_TEXTO.split(conteudo)
+    dentro_de_a = 0
+    for i, parte in enumerate(partes):
+        if parte.startswith("<"):
+            nome = parte[1:].lstrip("/").split()[0].rstrip(">").lower() if len(parte) > 2 else ""
+            if nome == "a":
+                dentro_de_a += -1 if parte.startswith("</") else (0 if parte.endswith("/>") else 1)
+                dentro_de_a = max(dentro_de_a, 0)
+            continue
+        if dentro_de_a or not parte.strip():
+            continue
+
+        novo = parte
+        for m in list(_RE_NUM_PROCESSO.finditer(parte))[::-1]:
+            alvo = await processo(m.group(1))
+            if alvo:
+                novo = novo[:m.start(1)] + _ancora_sei(alvo[0], alvo[1]) + novo[m.end(1):]
+                vinculadas.append({"tipo": "processo", "numero": alvo[1], "id": alvo[0]})
+            else:
+                nao_resolvidas.append(m.group(1))
+        # documentos: reaplica sobre o texto já alterado, pulando as âncoras novas
+        pedacos = _RE_TAG_OU_TEXTO.split(novo)
+        dentro = 0
+        for j, pedaco in enumerate(pedacos):
+            if pedaco.startswith("<"):
+                if pedaco.lower().startswith("<a"):
+                    dentro += 1
+                elif pedaco.lower().startswith("</a"):
+                    dentro = max(dentro - 1, 0)
+                continue
+            if dentro:
+                continue
+            for m in list(_RE_NUM_DOCUMENTO.finditer(pedaco))[::-1]:
+                alvo = await documento(m.group(2))
+                if alvo:
+                    pedaco = pedaco[:m.start(2)] + _ancora_sei(alvo[0], alvo[1]) + pedaco[m.end(2):]
+                    vinculadas.append({"tipo": "documento", "numero": alvo[1], "id": alvo[0]})
+                else:
+                    nao_resolvidas.append(m.group(2))
+            pedacos[j] = pedaco
+        partes[i] = "".join(pedacos)
+    return "".join(partes)
+
+
 @mcp.tool()
 async def sei_editar_secao(
     id_documento: str,
@@ -1803,6 +1916,7 @@ async def sei_editar_secao(
     versao: str = "",
     dry_run: bool = False,
     validar_referencias: bool = True,
+    vincular_referencias: bool = True,
     ctx: Context = None,
 ) -> str:
     """Altera o conteúdo de seções editáveis de um documento interno SEI.
@@ -1818,6 +1932,11 @@ async def sei_editar_secao(
     - dry_run: NÃO grava nada; devolve o payload exato que seria enviado
       (todas as seções, já normalizadas, com tamanhos em bytes). Use para
       inspecionar/isolar um problema numa chamada só, em vez de tentativa e erro.
+    - vincular_referencias (padrão true): números de processo
+      (ex.: 26101.018680/2026.11) e de documento citados como "ep. 24837023" ou
+      "SEI nº 24837023" viram links clicáveis do SEI. Só o texto fora de links
+      existentes é tocado; número não encontrado fica como texto e aparece em
+      `_referencias_sem_link`.
     - validar_referencias: confere se alguma âncora `id="lnkSeiNNNN"` está usando
       número SEI em vez do id interno (link morto). Avisos vão em `_avisos`.
 
@@ -1861,6 +1980,16 @@ async def sei_editar_secao(
             modelo = s.get("idSecaoModelo", "")
             if modelo:
                 alteracoes[modelo] = s.get("conteudo", "")
+
+        # Números de processo e documentos citados no texto viram links do SEI
+        vinculadas: list[dict] = []
+        nao_resolvidas: list[str] = []
+        if vincular_referencias:
+            cache_refs: dict = {}
+            for modelo, conteudo_novo in list(alteracoes.items()):
+                alteracoes[modelo] = await _vincular_referencias(
+                    client, conteudo_novo, cache_refs, vinculadas, nao_resolvidas,
+                )
 
         # Montar payload completo com TODAS as seções (o SEI recusa lista parcial:
         # EditorRN compara a contagem com a do banco e lança "Conteúdo do documento
@@ -2045,6 +2174,10 @@ async def sei_editar_secao(
             out["_waf_contornado"] = waf_info
         if regeneradas:
             out["_secoes_regeneradas_pelo_sei"] = sorted(regeneradas)
+        if vinculadas:
+            out["_referencias_vinculadas"] = vinculadas
+        if nao_resolvidas:
+            out["_referencias_sem_link"] = sorted(set(nao_resolvidas))
         if avisos:
             out["_avisos"] = avisos
         return _json(out)
