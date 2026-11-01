@@ -1,6 +1,7 @@
 """Testes de integração com sessões e respostas fictícias, sem rede."""
 import sys
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,7 +31,7 @@ class Resposta:
         if length is not None:
             self.headers["Content-Length"] = str(length)
         self.closed = False
-    def iter_content(self, chunk_size):
+    def iter_bytes(self, chunk_size):
         for pos in range(0, len(self.body), chunk_size):
             yield self.body[pos:pos + chunk_size]
     def close(self):
@@ -41,9 +42,13 @@ class SessaoFicticia:
     def __init__(self, resposta=None):
         self.resposta = resposta or Resposta()
         self.visitas = []
-    def get(self, url, **kw):
-        self.visitas.append((url, kw))
-        return self.resposta
+    @contextmanager
+    def stream(self, method, url, **kw):
+        self.visitas.append((method, url, kw))
+        try:
+            yield self.resposta
+        finally:
+            self.resposta.close()
 
 
 class UsuarioFicticio:
@@ -155,13 +160,14 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertEqual(mime, "application/pdf")
         self.assertTrue(content.startswith(b"%PDF-"))
-        url, kw = self.user.session.visitas[0]
+        method, url, kw = self.user.session.visitas[0]
+        self.assertEqual(method, "GET")
         self.assertEqual(
             url,
             "https://www.canaime.com.br/sgp2rr/fotos/presos_doc/0123456789abcdef.pdf",
         )
         self.assertIs(kw["allow_redirects"], False)
-        self.assertTrue(kw["stream"])
+        self.assertEqual(kw["timeout"], 25.0)
         self.assertTrue(self.user.session.resposta.closed)
 
     def test_pdf_rejects_invalid_format_and_size(self):
