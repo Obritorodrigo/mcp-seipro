@@ -75,8 +75,8 @@ def _url_consulta_permitida(caminho: str) -> None:
 class ClienteAutenticado:
     """Operações da sessão da requisição atual, nunca objetos globais.
 
-    abrir e enviar devem reproduzir o texto das ferramentas existentes.
-    sessao_http: objeto requests.Session autenticado desse usuário (opcional).
+    abrir deve reproduzir o texto de sgp_abrir_pagina existente.
+    sessao_http: adaptador httpx autenticado da mesma Sessao (opcional).
     """
     abrir: Callable[[str], Any]
     sessao_http: Any | None = None
@@ -165,15 +165,15 @@ class AdaptadorSGP2RR:
         if not isinstance(caminho, str) or not PDF_PATH.fullmatch(caminho):
             raise ValueError("Caminho PDF não permitido")
         sessao = self.cliente.sessao_http
-        if sessao is None or not callable(getattr(sessao, "get", None)):
+        if sessao is None or not callable(getattr(sessao, "stream", None)):
             raise RuntimeError(
-                "A sessão HTTP autenticada ainda não foi integrada para leitura de PDFs"
+                "Sessão HTTP httpx autenticada não disponível para leitura de PDFs"
             )
-        resposta = sessao.get(
-            BASE_HTTPS + caminho, timeout=(5, 25), stream=True,
-            allow_redirects=False,
-        )
-        try:
+        # O stream precisa ser do httpx.Client associado à sessão da requisição.
+        # Jamais seguir redirects, mesmo que o cliente global tenha essa opção ativa.
+        with sessao.stream(
+            "GET", BASE_HTTPS + caminho, timeout=25.0, follow_redirects=False
+        ) as resposta:
             if resposta.status_code != 200:
                 raise RuntimeError("Anexo não disponível na sessão autenticada")
             mime = resposta.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -184,7 +184,7 @@ class AdaptadorSGP2RR:
                 raise ValueError("PDF maior que 12 MiB")
             chunks: list[bytes] = []
             size = 0
-            for piece in resposta.iter_content(chunk_size=MAX_BODY_CHUNK):
+            for piece in resposta.iter_bytes(chunk_size=MAX_BODY_CHUNK):
                 if not piece:
                     continue
                 size += len(piece)
@@ -195,14 +195,12 @@ class AdaptadorSGP2RR:
             if not data.startswith(b"%PDF-"):
                 raise ValueError("Arquivo não possui assinatura PDF válida")
             return data, mime
-        finally:
-            resposta.close()
 
 
 def integrar_sgp2rr(
     mcp: Any, obter_cliente_atual: Callable[[], ClienteAutenticado]
 ) -> None:
-    """Registra oito ferramentas no MESMO FastMCP durante a inicialização.
+    """Registra oito ferramentas no MESMO MCPServer durante a inicialização.
 
     A fábrica só será chamada dentro da execução da tool MCP. Ela deve resolver
     a identidade OAuth vigente e recuperar a sessão daquela identidade.
