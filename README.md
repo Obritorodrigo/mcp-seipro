@@ -323,7 +323,7 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 | `sei_listar_documentos_bloco_assinatura` | Lista documentos do bloco |
 | `sei_disponibilizar_bloco_assinatura` | Disponibiliza bloco para assinatura |
 | `sei_cancelar_disponibilizacao_bloco` | Cancela disponibilização |
-| `sei_pesquisar_blocos_assinatura` | Pesquisa blocos existentes |
+| `sei_pesquisar_blocos_assinatura` | Pesquisa blocos pelo nome (ignora acento, maiúsculas e ordem das palavras) |
 | `sei_assinar_bloco` | Assina todos os documentos de um bloco |
 | `sei_assinar_documentos_bloco` | Assina documentos específicos de um bloco |
 | `sei_anotar_documento_bloco_assinatura` | Cria anotação em documento do bloco |

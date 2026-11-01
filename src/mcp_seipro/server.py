@@ -2600,6 +2600,46 @@ async def _pedir_cargo(client: SEIClient) -> str:
     })
 
 
+async def _resolver_cargo(client: SEIClient, cargo: str) -> tuple[str, str | None]:
+    """Devolve (nome_do_cargo_no_SEI, None) ou ("", resposta_para_escolher).
+
+    O SEI assina pelo NOME exato do cargo. Aceita o id da lista (ex.: "7376"),
+    o nome exato ou parte dele (sem acento, palavras em qualquer ordem). Nome
+    exato tem precedência ("Diretor do …" × "Diretora do …"). Se a lista não
+    puder ser lida, segue com o texto informado, como antes.
+    """
+    try:
+        resp = await client._request("GET", "/assinante/listar")
+        cargos = [c for c in (resp.json().get("data") or []) if isinstance(c, dict)]
+    except Exception:
+        return cargo, None
+    if not cargos:
+        return cargo, None
+
+    def nome(c):
+        return html.unescape(str(c.get("nome") or ""))
+
+    texto = str(cargo).strip()
+    if texto.isdigit():
+        por_id = [c for c in cargos if str(c.get("id") or "") == texto]
+        if len(por_id) == 1:
+            return nome(por_id[0]), None
+    alvo = _normalizar_busca(texto)
+    exatos = [c for c in cargos if _normalizar_busca(nome(c)) == alvo]
+    if len(exatos) == 1:
+        return nome(exatos[0]), None
+    termos = alvo.split()
+    parecidos = [c for c in cargos if termos and all(t in _normalizar_busca(nome(c)) for t in termos)]
+    if len(parecidos) == 1:
+        return nome(parecidos[0]), None
+    return "", _json({
+        "error": (f"Nenhum cargo corresponde a {texto!r} na unidade atual." if not parecidos
+                  else f"Mais de um cargo corresponde a {texto!r}."),
+        "cargos_disponiveis": parecidos or cargos,
+        "dica": "Nada foi assinado. Informe o `id` ou o nome exato do cargo em `cargo`.",
+    })
+
+
 async def _ativar_unidade_geradora(client: SEIClient, doc_id: str) -> str | None:
     """Ativa a unidade geradora do documento, se o usuário tiver acesso a ela.
 
@@ -2704,6 +2744,10 @@ async def sei_assinar_documento(
             })
 
         unidade_ativada = await _ativar_unidade_geradora(client, doc_id)
+
+        cargo, escolha = await _resolver_cargo(client, cargo)
+        if escolha:
+            return escolha
 
         result = await client.assinar_documento(
             id_documento=doc_id,
@@ -3236,6 +3280,9 @@ async def sei_assinar_bloco(
         senha = client._senha
         if not cargo:
             return await _pedir_cargo(client)
+        cargo, escolha = await _resolver_cargo(client, cargo)
+        if escolha:
+            return escolha
         result = await client.assinar_bloco(
             id_bloco=id_bloco, login=login, senha=senha, cargo=cargo,
         )
@@ -3267,6 +3314,9 @@ async def sei_assinar_documentos_bloco(
         senha = client._senha
         if not cargo:
             return await _pedir_cargo(client)
+        cargo, escolha = await _resolver_cargo(client, cargo)
+        if escolha:
+            return escolha
         result = await client.assinar_documentos_bloco(
             login=login, senha=senha, cargo=cargo, documentos=documentos,
         )
@@ -3634,14 +3684,28 @@ async def sei_cancelar_disponibilizacao_bloco(
 @mcp.tool()
 async def sei_pesquisar_blocos_assinatura(
     filtro: str = "",
+    estado: str = "",
     limit: int = 50,
     ctx: Context = None,
 ) -> str:
-    """Pesquisa blocos de assinatura existentes."""
+    """Pesquisa blocos de assinatura pelo nome (descrição).
+
+    Inclui os blocos da unidade atual e os disponibilizados a ela por outras
+    unidades. A busca ignora acentos e maiúsculas e aceita as palavras em
+    qualquer ordem. Sem `filtro`, lista os mais recentes.
+
+    Parâmetros:
+    - filtro: palavras do nome do bloco (vazio = todos)
+    - estado: códigos separados por vírgula — A=Aberto, D=Disponibilizado,
+      R=Retornado, C=Concluído, B=Recebido
+    - limit: máximo de blocos devolvidos (padrão 50)
+
+    Use o `id` em sei_listar_documentos_bloco_assinatura e sei_assinar_bloco.
+    """
     try:
         client = _get_client(ctx)
-        result = await client.pesquisar_blocos_assinatura(filtro=filtro, limit=limit)
-        return _json(result)
+        return _json(await _pesquisar_blocos(
+            client.pesquisar_blocos_assinatura, _bloco_assinatura_resumido, filtro, estado, limit))
     except Exception as e:
         return _error(str(e))
 
@@ -4738,6 +4802,82 @@ def _bloco_resumido(bloco: dict) -> dict:
     }
 
 
+async def _pesquisar_blocos(buscar, resumir, nome: str, estado: str, limit: int) -> dict:
+    """Busca de blocos (interno ou de assinatura) por nome, tolerante a acento.
+
+    1) busca nativa do SEI (`filter`, sensível a acento/charset);
+    2) varredura paginada comparada normalizada no servidor MCP.
+    Sem nome, para ao atingir `limit` e devolve total desconhecido.
+    """
+    estado = ",".join(e.strip().upper() for e in str(estado or "").split(",") if e.strip())
+    termos = _normalizar_busca(nome).split()
+    encontrados: dict[str, dict] = {}
+    varridos = 0
+    truncado = False
+    parou_cedo = False
+
+    def considerar(itens):
+        for bruto in itens or []:
+            if not isinstance(bruto, dict):
+                continue
+            bloco = resumir(bruto)
+            alvo = _normalizar_busca(bloco["descricao"])
+            if bloco["id"] and all(t in alvo for t in termos):
+                encontrados.setdefault(bloco["id"], bloco)
+
+    if termos:
+        try:
+            r = await buscar(filtro=nome, limit=_TAM_PAGINA_BLOCOS, estado=estado)
+            considerar(r.get("blocos"))
+        except Exception:
+            logger.debug("Busca nativa de blocos falhou; seguindo na varredura", exc_info=True)
+
+    for pagina in range(_MAX_PAGINAS_BLOCOS):
+        if not termos and len(encontrados) >= limit:
+            parou_cedo = True
+            break
+        r = await buscar(limit=_TAM_PAGINA_BLOCOS, start=pagina, estado=estado)
+        itens = r.get("blocos") or []
+        varridos += len(itens)
+        considerar(itens)
+        if len(itens) < _TAM_PAGINA_BLOCOS:
+            break
+    else:
+        truncado = True
+
+    blocos = sorted(encontrados.values(), key=lambda b: int(b["id"] or 0), reverse=True)
+    resultado = {
+        "nome_pesquisado": nome,
+        "estado": estado or "todos",
+        "total_encontrado": None if parou_cedo else len(blocos),
+        "retornados": min(len(blocos), limit),
+        "tem_mais": parou_cedo or len(blocos) > limit,
+        "blocos": blocos[:limit],
+    }
+    if truncado:
+        resultado["_aviso"] = (
+            f"A unidade tem mais de {varridos} blocos; só os "
+            f"{varridos} mais recentes foram verificados. Refine o nome ou o estado."
+        )
+    return resultado
+
+
+def _bloco_assinatura_resumido(bruto: dict) -> dict:
+    atrib = bruto.get("atributos") if isinstance(bruto.get("atributos"), dict) else bruto
+    base = _bloco_resumido({
+        "id": bruto.get("id") or atrib.get("idBloco"),
+        "descricao": atrib.get("descricao"),
+        "estado": atrib.get("estado"),
+        "siglaUnidade": atrib.get("siglaUnidade"),
+    })
+    base.pop("numero_processos", None)
+    base["numero_documentos"] = atrib.get("numeroDocumentos")
+    base["disponibilizado_para"] = [
+        u.get("unidade") for u in atrib.get("unidades") or [] if isinstance(u, dict)
+    ]
+    return base
+
+
 @mcp.tool()
 async def sei_pesquisar_blocos_internos(
     nome: str = "",
@@ -4763,69 +4903,8 @@ async def sei_pesquisar_blocos_internos(
     """
     try:
         client = _get_client(ctx)
-        estado = ",".join(e.strip().upper() for e in estado.split(",") if e.strip())
-        termos = _normalizar_busca(nome).split()
-
-        # 1) Busca do próprio SEI (rápida, mas sensível a acento/charset).
-        # 2) Varredura paginada com comparação normalizada no servidor MCP —
-        #    garante o acerto quando o nome tem acento ou está corrompido.
-        encontrados: dict[str, dict] = {}
-        varridos = 0
-        truncado = False
-        parou_cedo = False  # listagem sem nome: parou ao atingir `limit`
-
-        def considerar(itens):
-            for bruto in itens or []:
-                if not isinstance(bruto, dict):
-                    continue
-                bloco = _bloco_resumido(bruto)
-                alvo = _normalizar_busca(bloco["descricao"])
-                if bloco["id"] and all(t in alvo for t in termos):
-                    encontrados.setdefault(bloco["id"], bloco)
-
-        if termos:
-            try:
-                r = await client.pesquisar_blocos_internos(
-                    filtro=nome, limit=_TAM_PAGINA_BLOCOS, estado=estado
-                )
-                considerar(r.get("blocos"))
-            except Exception:
-                logger.debug("Busca nativa de blocos falhou; seguindo na varredura", exc_info=True)
-
-        for pagina in range(_MAX_PAGINAS_BLOCOS):
-            if not termos and len(encontrados) >= limit:
-                parou_cedo = True
-                break
-            r = await client.pesquisar_blocos_internos(
-                limit=_TAM_PAGINA_BLOCOS, start=pagina, estado=estado
-            )
-            itens = r.get("blocos") or []
-            varridos += len(itens)
-            considerar(itens)
-            if len(itens) < _TAM_PAGINA_BLOCOS:
-                break
-        else:
-            truncado = True
-
-        blocos = sorted(encontrados.values(), key=lambda b: int(b["id"] or 0), reverse=True)
-        resultado = {
-            "nome_pesquisado": nome,
-            "estado": estado or "todos",
-            "total_encontrado": len(blocos),
-            "retornados": min(len(blocos), limit),
-            "tem_mais": parou_cedo or len(blocos) > limit,
-            "blocos": blocos[:limit],
-        }
-        if parou_cedo:
-            # Sem nome a varredura para cedo (cada página custa ao SEI uma
-            # contagem de processos por bloco), então o total é parcial.
-            resultado["total_encontrado"] = None
-        if truncado:
-            resultado["_aviso"] = (
-                f"A unidade tem mais de {varridos} blocos; só os "
-                f"{varridos} mais recentes foram verificados. Refine o nome ou o estado."
-            )
-        return _json(resultado)
+        return _json(await _pesquisar_blocos(
+            client.pesquisar_blocos_internos, _bloco_resumido, nome, estado, limit))
     except Exception as e:
         return _error(str(e))
 
