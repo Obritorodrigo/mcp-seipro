@@ -101,7 +101,7 @@ class ServicoSGP:
         codigo = _codigo(codigo)
         main = self.backend.abrir_pagina(f"{FICHA}?id_cad_preso={codigo}")
         status = self.backend.abrir_pagina(f"{SITUATION}?id_cad_preso={codigo}")
-        m = re.search(r"(?m)^Unidade\s*\n([^\n]+)\s*\nAla\s*\n([^\n]+)(?:\s*\n(\d+))?", main)
+        m = re.search(r"(?m)^Unidade[ \t]*\n([^\n]+)\nAla[ \t]*\n([^\n]+)(?:\n(\d+))?", main)
         raw_status = _only_text(status)
         current = next((line.strip() for line in raw_status.splitlines()
                         if line.strip() in {"EM CUMPRIMENTO DE PENA", "LIBERADO", "FORAGIDO",
