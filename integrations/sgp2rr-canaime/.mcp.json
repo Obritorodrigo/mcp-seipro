@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "sgp2rr": {
+      "type": "streamable-http",
+      "url": "https://sgp2rr.projetogpt.com.br/mcp",
+      "headers": {},
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            }
+          }
+        }
+      }
+    }
+  }
+}
