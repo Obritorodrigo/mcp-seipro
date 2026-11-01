@@ -134,8 +134,15 @@ def _abrir_token(token: str) -> dict | None:
     payload = _abrir(token, "token", "s2.")
     if not payload or payload.get("exp", 0) < time.time():
         return None
-    if payload.get("sid") in _sessoes_revogadas:
+    from mcp_seipro.revogacoes import esta_revogada
+
+    sid = payload.get("sid")
+    if not isinstance(sid, str) or not sid:
         return None
+
+    if sid in _sessoes_revogadas or esta_revogada(sid):
+        return None
+
     return payload
 
 
@@ -161,7 +168,11 @@ def _podar() -> None:
 
 def _revogar_sessao(sid: str) -> None:
     if sid:
-        _sessoes_revogadas[sid] = time.time() + SESSION_MAX
+        from mcp_seipro.revogacoes import revogar
+
+        expira_em = time.time() + SESSION_MAX
+        revogar(sid, expira_em)
+        _sessoes_revogadas[sid] = expira_em
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +324,8 @@ class SEIProOAuthProvider:
             return None
         if payload.get("client_id") != client.client_id:
             return None
-        usado_em = _refresh_usados.get(payload["jti"])
+        from mcp_seipro.revogacoes import usado_em_refresh
+        usado_em = usado_em_refresh(payload["jti"])
         if usado_em is not None:
             # Refresh já trocado sendo reapresentado: quem o tem não é (só) o
             # cliente legítimo. Fora da janela de concorrência, derruba a sessão.
@@ -334,8 +346,11 @@ class SEIProOAuthProvider:
         scopes: list[str],
     ) -> OAuthToken:
         payload = _abrir_token(refresh_token.token)
-        if not payload or payload.get("typ") != "refresh" or payload["jti"] in _refresh_usados:
+        if not payload or payload.get("typ") != "refresh" or payload.get("client_id") != client.client_id:
             raise TokenError(error="invalid_grant", error_description="Invalid refresh token")
+        from mcp_seipro.revogacoes import consumir_refresh
+        if not consumir_refresh(payload["jti"], payload["sid"], float(payload["exp"])):
+            raise TokenError(error="invalid_grant", error_description="Refresh token already used")
         _refresh_usados[payload["jti"]] = time.time()
         auth_time = float(payload.get("auth_time", 0))
         if auth_time + SESSION_MAX <= time.time():

@@ -1,5 +1,6 @@
 """Cliente REST genérico para o mod-wssei v2 do SEI."""
 
+import asyncio
 import base64
 import json
 import logging
@@ -48,6 +49,7 @@ class SEIClient:
         self._orgao = kwargs.get("sei_orgao", os.environ.get("SEI_ORGAO", "0"))
         self._contexto = kwargs.get("sei_contexto", os.environ.get("SEI_CONTEXTO", ""))
         self._token: Optional[str] = None
+        self._auth_lock = asyncio.Lock()
         self._unidade_ativa: Optional[str] = None
         self._id_usuario: Optional[str] = None
         self._id_orgao_usuario: Optional[str] = None
@@ -342,10 +344,21 @@ class SEIClient:
     def _cache_set(self, key: str, val: Any) -> None:
         self._cache[key] = (time.monotonic(), val)
 
+    async def _autenticar_se_necessario(
+        self, token_anterior: Optional[str] = None
+    ) -> str:
+        async with self._auth_lock:
+            if token_anterior is None:
+                if not self._token:
+                    await self.autenticar()
+            elif self._token == token_anterior:
+                await self.autenticar()
+
+            return self._token
+
     async def _get_headers(self) -> dict:
-        if not self._token:
-            await self.autenticar()
-        return {"token": self._token}
+        token = await self._autenticar_se_necessario()
+        return {"token": token}
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         """Faz request com re-autenticação automática em caso de 401/403."""
@@ -362,8 +375,11 @@ class SEIClient:
         self._raise_if_waf_block(resp)
         if resp.status_code in (401, 403):
             logger.info("Token expirado, re-autenticando...")
-            await self.autenticar()
-            kwargs["headers"].update({"token": self._token})
+            token_anterior = kwargs["headers"].get("token")
+            token_atual = await self._autenticar_se_necessario(
+                token_anterior
+            )
+            kwargs["headers"].update({"token": token_atual})
             resp = await self._client.request(method, f"{self.base_url}{path}", **kwargs)
             await self._handle_cloudflare(resp)
             self._raise_if_waf_block(resp)
@@ -1249,10 +1265,11 @@ class SEIClient:
         }
         if id_usuario:
             payload["usuario"] = id_usuario
+        # SEI-PRO-ASSINATURA-ENCODING-V9
         resp = await self._request(
             "POST",
             "/documento/assinar",
-            data=payload,
+            **self._form_latin1(payload),
         )
         data = resp.json()
         if not data.get("sucesso"):
@@ -1689,7 +1706,7 @@ class SEIClient:
         """
         resp = await self._request(
             "POST", "/bloco/interno/anotacao/cadastrar",
-            data={"bloco": id_bloco, "protocolo": protocolo, "descricao": descricao},
+            data={"bloco": id_bloco, "protocolo": protocolo, "anotacao": descricao},
         )
         data = resp.json()
         if not data.get("sucesso"):
@@ -1704,7 +1721,7 @@ class SEIClient:
         """
         resp = await self._request(
             "POST", "/bloco/interno/anotacao/alterar",
-            data={"bloco": id_bloco, "protocolo": protocolo, "descricao": descricao},
+            data={"bloco": id_bloco, "protocolo": protocolo, "anotacao": descricao},
         )
         data = resp.json()
         if not data.get("sucesso"):
@@ -2412,6 +2429,24 @@ class SEIClient:
     # Bloco de assinatura — assinar
     # ------------------------------------------------------------------
 
+    def _form_latin1(self, payload: dict) -> dict:
+        # SEI-PRO-FORM-LATIN1-V9
+        # O wssei deste SEI interpreta o formulario como ISO-8859-1.
+        from urllib.parse import urlencode
+        try:
+            corpo = urlencode(
+                {k: str(v) for k, v in payload.items()},
+                encoding="latin-1",
+            ).encode("ascii")
+        except UnicodeEncodeError:
+            return {"data": payload}
+        return {
+            "content": corpo,
+            "headers": {
+                "Content-Type": "application/x-www-form-urlencoded; charset=ISO-8859-1"
+            },
+        }
+
     async def assinar_bloco(
         self, id_bloco: str, login: str, senha: str,
         cargo: str, orgao: str = "", id_usuario: str = "",
@@ -2426,7 +2461,7 @@ class SEIClient:
         if id_usuario:
             payload["usuario"] = id_usuario
         resp = await self._request(
-            "POST", f"/bloco/assinatura/{id_bloco}/assinar", data=payload
+            "POST", f"/bloco/assinatura/{id_bloco}/assinar", **self._form_latin1(payload)
         )
         data = resp.json()
         if not data.get("sucesso"):
@@ -2448,7 +2483,7 @@ class SEIClient:
         if id_usuario:
             payload["usuario"] = id_usuario
         resp = await self._request(
-            "POST", "/bloco/assinatura/assinar/documentos", data=payload
+            "POST", "/bloco/assinatura/assinar/documentos", **self._form_latin1(payload)
         )
         data = resp.json()
         if not data.get("sucesso"):

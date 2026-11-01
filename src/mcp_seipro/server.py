@@ -40,8 +40,24 @@ _http_port = int(os.environ.get("PORT", 8000))
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     if _http_mode:
-        # Modo HTTP: clients criados por request com credenciais do token OAuth
-        yield {"sei": None, "sei_web": None}
+        # Cada sessao OAuth possui clientes REST e web independentes.
+        clientes_rest = {}
+        clientes_web = {}
+
+        try:
+            yield {"sei": clientes_rest, "sei_web": clientes_web}
+        finally:
+            for client in list(clientes_rest.values()):
+                try:
+                    await client.close()
+                except Exception:
+                    logger.exception("Erro ao encerrar cliente SEI REST")
+
+            for client in list(clientes_web.values()):
+                try:
+                    await client.close()
+                except Exception:
+                    logger.exception("Erro ao encerrar cliente SEI Web")
     else:
         # Modo stdio: clients com credenciais das env vars
         client = SEIClient()
@@ -66,31 +82,44 @@ def _exigir_url_permitida(creds: dict) -> None:
         raise ValueError(f"{erro} Reconecte o MCP.")
 
 
+def _credenciais_sessao():
+    """Valida o token e identifica a sessão OAuth."""
+    from mcp.server.auth.middleware.auth_context import get_access_token
+    from mcp_seipro.auth import _abrir_token
+
+    access = get_access_token()
+    if not access:
+        raise ValueError("Autenticacao necessaria. Reconecte o MCP.")
+
+    payload = _abrir_token(access.token)
+    if not payload or payload.get("typ") != "access":
+        raise ValueError("Token invalido ou expirado. Reconecte o MCP.")
+
+    sid = payload.get("sid")
+    creds = payload.get("sei")
+
+    if not sid or not isinstance(creds, dict):
+        raise ValueError("Sessao OAuth invalida.")
+
+    _exigir_url_permitida(creds)
+    return sid, creds
+
+
 def _get_client(ctx: Context) -> SEIClient:
-    """Obtém o SEIClient REST, criando sob demanda em modo HTTP."""
-    client = ctx.request_context.lifespan_context.get("sei")
-    if client is not None:
-        return client
+    """Retorna cliente REST isolado por sessão OAuth."""
+    clientes = ctx.request_context.lifespan_context["sei"]
 
-    # Modo HTTP: extrai credenciais do token OAuth
-    if _http_mode:
-        from mcp.server.auth.middleware.auth_context import get_access_token
-        from mcp_seipro.auth import get_sei_credentials_from_token
+    if not _http_mode:
+        return clientes
 
-        access_token = get_access_token()
-        if not access_token:
-            raise ValueError("Autenticacao necessaria. Reconecte o MCP.")
+    sid, creds = _credenciais_sessao()
 
-        creds = get_sei_credentials_from_token(access_token.token)
-        if not creds:
-            raise ValueError("Token invalido ou expirado. Reconecte o MCP.")
-        _exigir_url_permitida(creds)
-
+    client = clientes.get(sid)
+    if client is None:
         client = SEIClient(**creds, permitir_arquivo_local=False)
-        ctx.request_context.lifespan_context["sei"] = client
-        return client
+        clientes[sid] = client
 
-    raise ValueError("SEIClient nao configurado. Verifique as variaveis de ambiente.")
+    return client
 
 
 def _web_scraper_enabled() -> bool:
@@ -105,31 +134,21 @@ def _web_scraper_enabled() -> bool:
 
 
 def _get_web_client(ctx: Context) -> SEIWebClient:
-    """Obtém o SEIWebClient (scraper), criando sob demanda em modo HTTP.
+    """Retorna cliente web isolado por sessão OAuth."""
+    clientes = ctx.request_context.lifespan_context["sei_web"]
 
-    O scraper mantém estado de sessão (cookies + infra_hash) e por isso é
-    instanciado uma vez por contexto, não por chamada.
-    """
-    client = ctx.request_context.lifespan_context.get("sei_web")
-    if client is not None:
-        return client
+    if not _http_mode:
+        return clientes
 
-    if _http_mode:
-        from mcp.server.auth.middleware.auth_context import get_access_token
-        from mcp_seipro.auth import get_sei_credentials_from_token
+    sid, creds = _credenciais_sessao()
 
-        access_token = get_access_token()
-        if not access_token:
-            raise ValueError("Autenticacao necessaria. Reconecte o MCP.")
-        creds = get_sei_credentials_from_token(access_token.token)
-        if not creds:
-            raise ValueError("Token invalido ou expirado. Reconecte o MCP.")
-        _exigir_url_permitida(creds)
+    client = clientes.get(sid)
+    if client is None:
         client = SEIWebClient(**creds)
-        ctx.request_context.lifespan_context["sei_web"] = client
-        return client
+        clientes[sid] = client
 
-    raise ValueError("SEIWebClient nao configurado.")
+    return client
+
 
 
 _http_kwargs = {}
@@ -142,7 +161,7 @@ if _http_mode:
     _provider = SEIProOAuthProvider()
 
     _http_kwargs = {
-        "host": "0.0.0.0",
+        "host": "127.0.0.1",
         "port": _http_port,
         "stateless_http": True,
         "transport_security": TransportSecuritySettings(
@@ -2511,25 +2530,159 @@ async def sei_assinar_documento(
 
         # Garante que a autenticação rodou e captura IdUsuario da sessão
         await client._get_headers()
-        id_usuario = client._id_usuario or ""
+        # SEI-PRO-ASSINATURA-AUTH-IDENTITY-V8
+        #
+        # Regra:
+        # - IdUsuario e IdOrgao vêm da MESMA autenticação que fornece o token;
+        # - não pesquisar identidade em /usuario/listar;
+        # - selecionar a unidade geradora do documento dentro desta mesma
+        #   operação antes de assinar.
 
-        # Fallback: procurar via /usuario/listar caso loginData não traga o id
+        await client._get_headers()
+
+        id_usuario = str(
+            getattr(client, "_id_usuario", "") or ""
+        ).strip()
+
+        # Algumas instalações do WSSEI não retornam IdOrgao em loginData.
+        # Nesse caso, usar o órgão da própria sessão autenticada.
+        id_orgao_usuario = str(
+            getattr(client, "_id_orgao_usuario", "")
+            or getattr(client, "_orgao", "")
+            or ""
+        ).strip()
+
         if not id_usuario:
-            try:
-                result = await client.listar_usuarios(filtro=login, apenas_unidade=False)
-                for u in result.get("usuarios", []):
-                    if u.get("sigla", "").lower() == login.lower():
-                        id_usuario = str(u.get("id_usuario") or "")
-                        break
-            except Exception:
-                pass
+            await client.autenticar()
+
+            id_usuario = str(
+                getattr(client, "_id_usuario", "") or ""
+            ).strip()
+
+            id_orgao_usuario = str(
+                getattr(client, "_id_orgao_usuario", "")
+                or getattr(client, "_orgao", "")
+                or ""
+            ).strip()
+
+        if not id_usuario:
+            return _json({
+                "error": "Assinatura bloqueada: autenticação SEI não forneceu IdUsuario."
+            })
+
+        if not id_orgao_usuario:
+            return _json({
+                "error": "Assinatura bloqueada: órgão da sessão SEI não identificado."
+            })
+
+        # Localizar a unidade geradora real do documento.
+        try:
+            meta_doc = await client.consultar_documento_interno(doc_id)
+
+            id_procedimento_doc = str(
+                meta_doc.get("protocolo")
+                or meta_doc.get("idProcedimento")
+                or meta_doc.get("IdProcedimento")
+                or ""
+            ).strip()
+
+        except Exception:
+            return _json({
+                "error": "Assinatura bloqueada: processo do documento não identificado."
+            })
+
+        if not id_procedimento_doc:
+            return _json({
+                "error": "Assinatura bloqueada: documento sem processo identificado."
+            })
+
+        try:
+            dados_docs = await client.listar_documentos_todos(
+                id_procedimento_doc
+            )
+            documentos_proc = dados_docs.get("documentos", [])
+        except Exception:
+            return _json({
+                "error": "Assinatura bloqueada: falha ao consultar árvore do processo."
+            })
+
+        id_unidade_doc = ""
+        doc_id_normalizado = str(doc_id).strip()
+
+        for documento in documentos_proc:
+            if not isinstance(documento, dict):
+                continue
+
+            atributos = documento.get("atributos")
+            if not isinstance(atributos, dict):
+                atributos = {}
+
+            id_item = str(
+                documento.get("id")
+                or atributos.get("idProtocolo")
+                or atributos.get("IdProtocolo")
+                or ""
+            ).strip()
+
+            if id_item != doc_id_normalizado:
+                continue
+
+            id_unidade_doc = str(
+                atributos.get("idUnidade")
+                or atributos.get("IdUnidade")
+                or ""
+            ).strip()
+
+            if id_unidade_doc:
+                break
+
+        if not id_unidade_doc:
+            return _json({
+                "error": "Assinatura bloqueada: unidade geradora não localizada."
+            })
+
+        # Confirma que o usuário autenticado tem acesso à unidade.
+        try:
+            unidades_usuario = await client.listar_unidades_usuario()
+            ids_permitidos = {
+                str(
+                    u.get("id")
+                    or u.get("idUnidade")
+                    or u.get("IdUnidade")
+                    or ""
+                ).strip()
+                for u in unidades_usuario
+                if isinstance(u, dict)
+            }
+        except Exception:
+            return _json({
+                "error": "Assinatura bloqueada: não foi possível validar acesso à unidade."
+            })
+
+        if id_unidade_doc not in ids_permitidos:
+            return _json({
+                "error": "Assinatura bloqueada: usuário sem acesso à unidade geradora."
+            })
+
+        # Fundamental no modo HTTP/Online:
+        # troca de unidade e assinatura ocorrem na MESMA operação/cliente.
+        try:
+            await client.trocar_unidade(id_unidade_doc)
+        except Exception:
+            return _json({
+                "error": "Assinatura bloqueada: não foi possível ativar a unidade geradora."
+            })
+
+        # O WSSEI espera o órgão do próprio usuário assinante.
+        orgao_assinatura = id_orgao_usuario
 
         result = await client.assinar_documento(
             id_documento=doc_id,
             login=login,
             senha=senha,
             cargo=cargo,
-            orgao=orgao,
+            orgao=orgao_assinatura,
+            # SEI-PRO-ASSINATURA-USUARIO-UNIDADE-V6
             id_usuario=id_usuario,
         )
         return _json(result)
@@ -4769,6 +4922,7 @@ def _aplicar_tool_annotations() -> None:
 _aplicar_tool_annotations()
 
 
+
 def main():
     if _http_mode:
         import uvicorn
@@ -4816,7 +4970,7 @@ def main():
 
         config = uvicorn.Config(
             app,
-            host="0.0.0.0",
+            host="127.0.0.1",
             port=_http_port,
             log_level="info",
         )
