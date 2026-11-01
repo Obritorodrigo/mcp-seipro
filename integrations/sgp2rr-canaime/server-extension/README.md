@@ -8,12 +8,32 @@ servidor hospedado.
 
 | Ferramenta | Uso | Método |
 | --- | --- | --- |
-| sgp_pesquisar_reeducando(nome, unidade="") | Busca pelo nome e identifica códigos | Formulário GET de pesquisa |
+| sgp_pesquisar_reeducando(nome, unidade="") | Pesquisa por nome (compatibilidade) | Formulário GET de pesquisa |
+| sgp_criterios_pesquisa() | Lista todos os critérios e unidades disponíveis | Sem consulta a cadastros |
+| sgp_pesquisar_cadastro(criterio, valor, unidade="", limite=30) | Pesquisa por 13 critérios, incluindo código, CPF, filiação, endereço, vulgo, telefone e demais opções | Dois formulários GET, conforme o critério |
 | sgp_consultar_ficha(codigo) | Unidade, ala e situação atual | Leitura de duas páginas |
 | sgp_consultar_historico(codigo) | Datas/unidade/conduta | Leitura paginada do histórico |
 | sgp_consultar_certidao(codigo) | Resumo da certidão carcerária | Leitura da página de impressão |
 | sgp_listar_anexos(codigo) | Relaciona anexos PDF do histórico | Sem baixar arquivos |
 | sgp_ler_anexo(codigo, indice, paginas=5) | Extrai texto do PDF da sessão | Download autenticado e extração local |
+
+## Pesquisa multícritério (fase 2)
+
+A consulta do formulário real do Canaimé apresentou os critérios: `nome`, `vulgo`, `mae`, `pai`, `pais_orig`, `rg`, `cpf`, `telefone`, `celular`, `endereco`, `bairro`, `foto`. Existe, separadamente, pesquisa direta pelo `codigo` (`id_cad_preso`).
+
+Exemplos com informações **fictícias**, usando a nova ferramenta `sgp_pesquisar_cadastro`:
+
+~~~text
+criterio="nome", valor="PESSOA FICTICIA", unidade="CPP"
+criterio="mae", valor="NOME EXEMPLO"
+criterio="pai", valor="NOME EXEMPLO"
+criterio="cpf", valor="123.456.789-09"
+criterio="endereco", valor="RUA FICTICIA"
+criterio="bairro", valor="BAIRRO EXEMPLO"
+criterio="codigo", valor="77"          # não suporta filtro de unidade
+~~~
+
+**Atenção:** o formulário mostra opção `foto`, mas seu significado operacional ainda precisa de homologação real. O módulo envia o critério ao formulário GET sem fazer download de imagens. Documentos e endereços são aceitos somente como filtros, não retornados como campos de identificação na resposta; os resultados apresentam nome e código. Os resultados são limitados a 30 cadastros por consulta; paginação completa não foi implementada. O backend deve preservar isolamento de sessão e aplicar autorização, auditoria e limites de consultas conforme a política institucional.
 
 A rotina de leitura de PDF resolve a limitação da ferramenta HTML
 sgp_abrir_pagina, que reconhece o arquivo mas não consegue ler application/pdf.
