@@ -70,8 +70,12 @@ def resumir_argumentos(args: dict) -> dict:
     return saida
 
 
-def resumir_resultado(retorno) -> tuple[bool, dict | str | None]:
-    """(ok, resumo) a partir do retorno da tool (JSON em texto)."""
+def resumir_resultado(retorno) -> tuple[bool | str, dict | str | None]:
+    """(ok, resumo) a partir do retorno da tool (JSON em texto).
+
+    `ok` é True, False ou "sem_alteracao" — quando a tool só devolveu opções
+    para o usuário escolher (`cargos_disponiveis`, `hipoteses_disponiveis`).
+    """
     dados = retorno
     if isinstance(retorno, str):
         try:
@@ -80,6 +84,9 @@ def resumir_resultado(retorno) -> tuple[bool, dict | str | None]:
             return True, _resumir_valor(retorno)
     if isinstance(dados, dict):
         if "error" in dados:
+            # Pedido de escolha (cargo, hipótese legal…): nada foi tentado no SEI.
+            if any(k.endswith("_disponiveis") for k in dados):
+                return "sem_alteracao", {"motivo": _resumir_valor(str(dados.get("error")))}
             return False, {"erro": _resumir_valor(str(dados.get("error")))}
         escalares = {
             k: _resumir_valor(v) for k, v in dados.items()

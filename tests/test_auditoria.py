@@ -90,3 +90,18 @@ def test_identidade_nao_expoe_sid():
     ident = auditoria.identificar("sid-secreto-123", "10924687738")
     assert ident["usuario"] == "10924687738"
     assert "sid-secreto" not in json.dumps(ident) and len(ident["sessao"]) == 12
+
+
+def test_pedido_de_escolha_nao_conta_como_erro():
+    ok, resumo = auditoria.resumir_resultado(json.dumps({
+        "error": "Para tornar o documento restrito, o SEI exige uma hipótese legal.",
+        "hipoteses_disponiveis": [{"id": "1"}],
+    }))
+    assert ok == "sem_alteracao"
+    assert "hipótese" in resumo["motivo"]
+
+    ok, _ = auditoria.resumir_resultado(json.dumps({"error": "Cargo não informado", "cargos_disponiveis": []}))
+    assert ok == "sem_alteracao"
+
+    ok, _ = auditoria.resumir_resultado(json.dumps({"error": "Acesso negado"}))
+    assert ok is False
