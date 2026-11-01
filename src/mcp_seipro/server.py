@@ -929,6 +929,7 @@ async def _resolver_documento(client: SEIClient, referencia: str) -> tuple[str, 
     referencia = referencia.strip()
 
     # Estratégia 1: consulta direta pelo número SEI (não depende de indexação)
+    numero_existe_sem_acesso = None
     if referencia.isdigit():
         try:
             doc = await client.consultar_documento_interno_formatado(referencia)
@@ -948,8 +949,13 @@ async def _resolver_documento(client: SEIClient, referencia: str) -> tuple[str, 
                     except Exception:
                         pass
                 return id_interno, tipo
-        except Exception:
-            pass
+        except Exception as e:
+            # consultarDocumentoInternoFormatado acha o número em QUALQUER
+            # unidade e só depois checa acesso: "não encontrado" = o número SEI
+            # não existe; outro erro = existe, mas a unidade atual não o vê.
+            msg = str(e)
+            if "não encontrado" not in msg.lower() and "nao encontrado" not in msg.lower():
+                numero_existe_sem_acesso = msg
 
     # Estratégia 2: Pesquisa Solr (mais confiável, evita confusão id/proto)
     try:
@@ -972,6 +978,17 @@ async def _resolver_documento(client: SEIClient, referencia: str) -> tuple[str, 
                 continue
     except Exception:
         pass
+
+    # O número é de um documento que existe mas não está acessível na unidade
+    # atual. Tratá-lo como id interno acertaria OUTRO documento (números SEI e
+    # ids internos têm a mesma ordem de grandeza): visto ao vivo, "24847106"
+    # caiu num Empenho de outra secretaria.
+    if numero_existe_sem_acesso:
+        raise ValueError(
+            f"O documento SEI {referencia} existe, mas a unidade atual não tem acesso a ele "
+            f"({numero_existe_sem_acesso}). Troque para a unidade do processo com "
+            "sei_trocar_unidade e tente de novo."
+        )
 
     # Estratégia 3: Tentar como id direto (para quando o usuário informa o id interno)
     # Só tenta se o Solr não encontrou nada — para evitar confusão

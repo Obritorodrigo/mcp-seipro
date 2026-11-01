@@ -56,6 +56,12 @@ class SEIClient:
         self._token: Optional[str] = None
         self._auth_lock = asyncio.Lock()
         self._unidade_ativa: Optional[str] = None
+        # Unidade escolhida nesta sessão (trocar_unidade). Vai no cabeçalho
+        # `unidade` de TODA requisição: o wssei refaz o login a cada chamada e a
+        # "unidade atual" do SEI é a ÚLTIMA usada pelo usuário em qualquer lugar
+        # (outra conversa, a tela do SEI…). Sem o cabeçalho, outra sessão da
+        # mesma pessoa muda a unidade desta no meio de uma operação.
+        self._unidade_escolhida: Optional[str] = None
         # Charset dos campos de formulário. O wssei repassa os campos crus ao
         # núcleo do SEI, que grava em ISO-8859-1: UTF-8 vira "Ã§" no banco.
         # "utf-8" restaura o comportamento antigo para instalações que já
@@ -370,7 +376,11 @@ class SEIClient:
 
     async def _get_headers(self) -> dict:
         token = await self._autenticar_se_necessario()
-        return {"token": token}
+        headers = {"token": token}
+        if self._unidade_escolhida:
+            # TokenValidationMiddleware: `unidade` → alterarUnidadeAtual() antes da rota
+            headers["unidade"] = self._unidade_escolhida
+        return headers
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         """Faz request com re-autenticação automática em caso de 401/403."""
@@ -431,8 +441,9 @@ class SEIClient:
             self._id_orgao_usuario = str(id_orgao_usuario)
         id_unidade_atual = login_data.get("IdUnidadeAtual") or login_data.get("idUnidadeAtual")
         if id_unidade_atual is not None:
-            # Login novo = sessão nova no SEI, que volta à unidade padrão.
-            self._unidade_ativa = str(id_unidade_atual)
+            # Login novo devolve a "última unidade" do usuário; se esta sessão
+            # escolheu outra, o cabeçalho `unidade` a impõe em cada requisição.
+            self._unidade_ativa = self._unidade_escolhida or str(id_unidade_atual)
             self._cache.pop("unidades_usuario", None)
         logger.info("Autenticação SEI bem-sucedida")
         return self._token
@@ -1027,6 +1038,7 @@ class SEIClient:
         if not data.get("sucesso"):
             raise Exception(f"Erro ao trocar unidade: {data.get('mensagem')}")
         self._unidade_ativa = id_unidade
+        self._unidade_escolhida = str(id_unidade)
         # A lista do SIP omite a unidade atual: com a troca, ela muda.
         self._cache.pop("unidades_usuario", None)
         return {"mensagem": data.get("mensagem")}
