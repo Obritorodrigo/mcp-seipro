@@ -1491,15 +1491,20 @@ async def sei_criar_documento(
     descricao: str = "",
     nivel_acesso: str = "0",
     id_unidade: str = "",
+    hipotese_legal: str = "",
     ctx: Context = None,
 ) -> str:
     """Cria um novo documento interno (nativo) em um processo SEI.
 
     Parâmetros:
     - processo: protocolo formatado (ex: 50300.018905/2018-67) ou IdProcedimento
-    - id_serie: código do tipo de documento (use sei_pesquisar_tipos_documento)
+    - id_serie: tipo do documento — id (ex.: "290") ou nome (ex.: "Ofício",
+      "despacho"; sem acento/maiúsculas, nome exato tem precedência)
     - descricao: descrição/título do documento
-    - nivel_acesso: 0=público, 1=restrito, 2=sigiloso
+    - nivel_acesso: publico, restrito ou sigiloso (ou 0, 1, 2)
+    - hipotese_legal: id ou nome da hipótese — obrigatória para restrito/sigiloso.
+      Sem ela (ou com nome ambíguo) NADA é criado e a resposta lista as
+      hipóteses válidas para o usuário escolher.
     - id_unidade: ID da unidade geradora (opcional)
 
     O documento é criado vazio. Use sei_listar_secoes e sei_editar_secao
@@ -1508,13 +1513,48 @@ async def sei_criar_documento(
     try:
         client = _get_client(ctx)
         id_procedimento = await _resolver_processo(client, processo)
+        serie = str(id_serie).strip()
+        nome_tipo = ""
+        if not serie.isdigit():
+            serie, nome_tipo = await _resolver_tipo_documento(client, serie)
+
+        nivel = _normalizar_nivel(nivel_acesso) or "0"
+        hipotese = ""
+        if nivel in ("1", "2"):
+            # Resolve ANTES de criar: sem hipótese válida, nada é criado.
+            hipotese, escolha = await _resolver_hipotese(client, nivel, hipotese_legal)
+            if escolha:
+                return _json(escolha)
+
+        # A rota de criação não aceita hipótese legal: cria público e, se for o
+        # caso, aplica nível + hipótese em seguida (preservando o resto).
         result = await client.criar_documento_interno(
             id_procedimento=id_procedimento,
-            id_serie=id_serie,
+            id_serie=serie,
             descricao=descricao,
-            nivel_acesso=nivel_acesso,
+            nivel_acesso="0" if nivel in ("1", "2") else nivel,
             id_unidade=id_unidade,
         )
+        if nivel in ("1", "2") and isinstance(result, dict) and result.get("idDocumento"):
+            try:
+                await client.alterar_documento_interno(
+                    id_documento=str(result["idDocumento"]), nivel_acesso=nivel,
+                    id_hipotese_legal=hipotese,
+                )
+                result["nivel_acesso"] = nivel
+                result["hipotese_legal"] = hipotese
+            except Exception as e:
+                result["_aviso"] = (
+                    "O documento foi criado PÚBLICO, mas não foi possível torná-lo "
+                    f"{'restrito' if nivel == '1' else 'sigiloso'}: {e}. Ajuste com "
+                    "sei_alterar_documento_interno antes de inserir conteúdo sensível."
+                )
+        if isinstance(result, dict):
+            result.setdefault("nivel_acesso", nivel)
+            result["nivel_acesso_descricao"] = access_control.ROTULOS.get(
+                str(result["nivel_acesso"]), str(result["nivel_acesso"]))
+            if nome_tipo:
+                result["tipo"] = nome_tipo
         return _json(result)
     except Exception as e:
         return _error(str(e))
