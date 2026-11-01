@@ -271,3 +271,25 @@ def sanitize_iso8859(text: str) -> str:
         except UnicodeEncodeError:
             result.append(f"&#{ord(char)};")
     return "".join(result)
+
+
+# Classe de âncora que o SEI reconhece ao montar o link (EditorRN). Variantes
+# como `ancora_sei` gravam o texto, mas o link não fica clicável — visto ao vivo
+# no Ofício 64/2026/SEJUC/DEPLAF (sei.rr.gov.br), em referências escritas por
+# um agente.
+_RE_CLASSE_ANCORA = re.compile(
+    r'(<a\b[^>]*\bclass\s*=\s*["\'])(?:ancora[_-]sei|ancora_SEI|ancorasei|AncoraSei)(["\'][^>]*\bid\s*=\s*["\']lnkSei)',
+    re.I,
+)
+_RE_CLASSE_ANCORA_ID_ANTES = re.compile(
+    r'(<a\b[^>]*\bid\s*=\s*["\']lnkSei\d+["\'][^>]*\bclass\s*=\s*["\'])(?:ancora[_-]sei|ancorasei)(["\'])',
+    re.I,
+)
+
+
+def corrigir_classe_ancora_sei(texto: str) -> str:
+    """Normaliza a classe das âncoras `lnkSei…` para `ancoraSei`."""
+    if not texto or "lnkSei" not in texto:
+        return texto
+    texto = _RE_CLASSE_ANCORA.sub(lambda m: m.group(1) + "ancoraSei" + m.group(2), texto)
+    return _RE_CLASSE_ANCORA_ID_ANTES.sub(lambda m: m.group(1) + "ancoraSei" + m.group(2), texto)

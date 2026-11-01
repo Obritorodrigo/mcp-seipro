@@ -21,7 +21,7 @@ from mcp_seipro.shaping import shape_processo_resumido
 from mcp_seipro.html_utils import (
     html_to_text, html_to_markdown,
     pdf_to_text, pdf_to_markdown,
-    normalizar_entidades_html, sanitize_iso8859,
+    normalizar_entidades_html, sanitize_iso8859, corrigir_classe_ancora_sei,
 )
 from mcp_seipro.sei_styles import (
     SEI_STYLES, STYLE_SHORTCUTS,
@@ -1893,6 +1893,7 @@ async def sei_editar_secao(
             # Normaliza entidades em TODAS as seções — inclusive nas relidas do
             # próprio SEI, que é onde elas nascem e se acumulam.
             conteudo = normalizar_entidades_html(conteudo)
+            conteudo = corrigir_classe_ancora_sei(conteudo)
 
             secoes_enviar.append({
                 "id": str(sid),

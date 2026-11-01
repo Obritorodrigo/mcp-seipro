@@ -66,3 +66,17 @@ if __name__ == "__main__":
             print(f"  ❌ {t.__name__}"); traceback.print_exc()
     print(f"\n{ok}/{len(testes)} passaram")
     sys.exit(0 if ok == len(testes) else 1)
+
+
+def test_classe_de_ancora_sei_e_corrigida():
+    from mcp_seipro.html_utils import corrigir_classe_ancora_sei
+
+    errado = ('<span contenteditable="false"><a class="ancora_sei" id="lnkSei27102769" '
+              'style="text-indent:0;">24837023</a></span>')
+    certo = corrigir_classe_ancora_sei(errado)
+    assert 'class="ancoraSei" id="lnkSei27102769"' in certo
+    # id antes da classe também
+    assert 'class="ancoraSei"' in corrigir_classe_ancora_sei('<a id="lnkSei1" class="ancora-sei">2</a>')
+    # já correto e outras âncoras ficam como estão
+    ok = '<a class="ancoraSei" id="lnkSei1">2</a> <a class="ancora_sei" href="x">y</a>'
+    assert corrigir_classe_ancora_sei(ok) == ok
