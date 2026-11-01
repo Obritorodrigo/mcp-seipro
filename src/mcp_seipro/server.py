@@ -936,6 +936,20 @@ async def sei_buscar_documento(
         return _error(str(e))
 
 
+async def _resolver_documentos(client: SEIClient, referencias: str) -> str:
+    """Resolve uma lista "a, b, c" de números SEI/ids internos para ids internos (CSV).
+
+    As rotas de bloco e assinatura recebem o id interno; o número SEI que o
+    usuário vê colide com ids de magnitude parecida e cairia em OUTRO documento
+    sem aviso (visto ao vivo: 24846961 → documento 22734049).
+    """
+    ids = []
+    for ref in [r.strip() for r in str(referencias).split(",") if r.strip()]:
+        doc_id, _ = await _resolver_documento(client, ref)
+        ids.append(str(doc_id))
+    return ",".join(ids)
+
+
 async def _resolver_documento(client: SEIClient, referencia: str) -> tuple[str, str]:
     """Resolve uma referência de documento para (id_interno, tipo_documento).
 
@@ -3522,6 +3536,7 @@ async def sei_listar_assinaturas(
     """Lista as assinaturas de um documento."""
     try:
         client = _get_client(ctx)
+        id_documento, _ = await _resolver_documento(client, id_documento)
         result = await client.listar_assinaturas(id_documento)
         return _json(result)
     except Exception as e:
@@ -3751,7 +3766,7 @@ async def sei_assinar_documentos_bloco(
     devolve a lista de cargos disponíveis, para o usuário escolher. O cargo não
     fica guardado entre chamadas.
 
-    - documentos: ID(s) de documento(s) separados por vírgula
+    - documentos: número(s) SEI ou id(s) interno(s), separados por vírgula
     - cargo: cargo/função — OBRIGATÓRIO (se omitido, lista opções disponíveis)
     """
     try:
@@ -3763,6 +3778,7 @@ async def sei_assinar_documentos_bloco(
         cargo, escolha = await _resolver_cargo(client, cargo)
         if escolha:
             return escolha
+        documentos = await _resolver_documentos(client, documentos)
         result = await client.assinar_documentos_bloco(
             login=login, senha=senha, cargo=cargo, documentos=documentos,
         )
@@ -4083,10 +4099,11 @@ async def sei_incluir_documento_bloco_assinatura(
     """Inclui documento(s) em um bloco de assinatura.
 
     - id_bloco: ID do bloco de assinatura
-    - documentos: ID(s) de documento(s) separados por vírgula
+    - documentos: número(s) SEI ou id(s) interno(s), separados por vírgula
     """
     try:
         client = _get_client(ctx)
+        documentos = await _resolver_documentos(client, documentos)
         result = await client.incluir_documento_bloco_assinatura(id_bloco, documentos)
         return _json(result)
     except Exception as e:
@@ -4689,6 +4706,7 @@ async def sei_listar_blocos_documento(
     """
     try:
         client = _get_client(ctx)
+        id_documento, _ = await _resolver_documento(client, id_documento)
         result = await client.listar_blocos_documento(id_documento)
         return _json(result)
     except Exception as e:
@@ -6090,10 +6108,11 @@ async def sei_retirar_documentos_bloco_assinatura(
 ) -> str:
     """Retira documento(s) de um bloco de assinatura.
 
-    - documentos: ID(s) de documento(s) separados por vírgula
+    - documentos: número(s) SEI ou id(s) interno(s), separados por vírgula
     """
     try:
         client = _get_client(ctx)
+        documentos = await _resolver_documentos(client, documentos)
         result = await client.retirar_documento_bloco_assinatura(id_bloco, documentos)
         return _json(result)
     except Exception as e:
@@ -6205,6 +6224,7 @@ async def sei_anotar_documento_bloco_assinatura(
     """
     try:
         client = _get_client(ctx)
+        documento = await _resolver_documentos(client, documento)
         result = await client.anotar_documento_bloco_assinatura(id_bloco, documento, descricao)
         return _json(result)
     except Exception as e:
@@ -6225,6 +6245,7 @@ async def sei_alterar_anotacao_bloco_assinatura(
     """
     try:
         client = _get_client(ctx)
+        documento = await _resolver_documentos(client, documento)
         result = await client.alterar_anotacao_bloco_assinatura(id_bloco, documento, descricao)
         return _json(result)
     except Exception as e:
