@@ -3782,10 +3782,13 @@ async def sei_alterar_documento_interno(
 ) -> str:
     """Altera metadados de um documento interno (não o conteúdo HTML).
 
-    Para alterar o conteúdo, use sei_editar_secao.
+    Para alterar o conteúdo, use sei_editar_secao. Só os campos informados
+    mudam: os demais (descrição, nível de acesso, assuntos, interessados,
+    destinatários, observação) são lidos do documento e reenviados, pois o
+    SEI apagaria o que não viesse na alteração.
     - id_documento: ID interno do documento
-    - descricao: nova descrição
-    - nivel_acesso: 0=público, 1=restrito, 2=sigiloso
+    - descricao: nova descrição (vazio = mantém a atual)
+    - nivel_acesso: 0=público, 1=restrito, 2=sigiloso (vazio = mantém)
     - hipotese_legal: ID da hipótese (obrigatório se restrito/sigiloso)
 
     Disponível desde mod-wssei 2.0.0 (SEI 4.0.x).
@@ -3817,9 +3820,13 @@ async def sei_alterar_documento_externo(
 ) -> str:
     """Altera metadados de um documento externo (e opcionalmente substitui o arquivo).
 
+    Só os campos informados mudam: os demais (descrição, nível de acesso,
+    número, tipo, data de elaboração, remetente, assuntos, interessados,
+    destinatários, observação) são lidos do documento e reenviados, pois o
+    SEI apagaria o que não viesse na alteração.
     - id_documento: ID interno do documento
-    - descricao: nova descrição
-    - nivel_acesso: 0=público, 1=restrito, 2=sigiloso
+    - descricao: nova descrição (vazio = mantém a atual)
+    - nivel_acesso: 0=público, 1=restrito, 2=sigiloso (vazio = mantém)
     - hipotese_legal: ID da hipótese (obrigatório se restrito/sigiloso)
     - arquivo_base64 + nome_arquivo: novo arquivo para substituir (opcional)
     - arquivo_path: caminho de novo arquivo NO SERVIDOR do MCP (opcional; só

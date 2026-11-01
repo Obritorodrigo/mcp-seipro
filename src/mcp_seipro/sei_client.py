@@ -623,6 +623,70 @@ class SEIClient:
             raise Exception(f"Erro ao consultar documento externo {id_documento}: {data.get('mensagem')}")
         return data["data"]
 
+    @staticmethod
+    def _ids_csv(itens) -> str:
+        if isinstance(itens, dict):
+            itens = [itens]
+        ids = []
+        for item in itens or []:
+            if isinstance(item, dict):
+                ident = item.get("id") or item.get("idContato") or item.get("idAssunto")
+            else:
+                ident = item
+            if ident not in (None, ""):
+                ids.append(str(ident))
+        return ",".join(ids)
+
+    @classmethod
+    def _payload_alteracao(
+        cls,
+        atual: dict,
+        descricao: str = "",
+        nivel_acesso: str = "",
+        id_hipotese_legal: str = "",
+        externo: bool = False,
+    ) -> dict:
+        """Monta o POST de alteração de documento PRESERVANDO os metadados.
+
+        O wssei (`MdWsSeiDocumentoRN::encapsulaDocumento`) grava TODOS os campos
+        a partir do POST: o que não vier é apagado — descrição, nível de
+        acesso, hipótese, grau de sigilo, observação, assuntos, interessados,
+        destinatários, tipo de conferência e, no externo, número, série, data
+        de elaboração e remetente. Por isso a alteração parte da consulta atual
+        e só troca o que foi pedido.
+        """
+        def atual_str(chave):
+            valor = atual.get(chave)
+            return "" if valor is None else str(valor)
+
+        nivel = str(nivel_acesso or atual_str("nivelAcesso"))
+        hipotese = str(id_hipotese_legal or atual_str("idHipoteseLegal"))
+        grau = atual_str("grauSigilo")
+        if nivel == "0":
+            hipotese, grau = "", ""
+        elif nivel == "1":
+            grau = ""
+
+        payload = {
+            "descricao": descricao or atual_str("descricao"),
+            "nivelAcesso": nivel,
+            "idHipoteseLegal": hipotese,
+            "grauSigilo": grau,
+            "observacao": atual_str("observacao"),
+            "assuntos": cls._ids_csv(atual.get("assuntos")),
+            "interessados": cls._ids_csv(atual.get("interessados")),
+            "destinatarios": cls._ids_csv(atual.get("destinatarios")),
+            "idTipoConferencia": atual_str("idTipoConferencia"),
+        }
+        if externo:
+            payload.update({
+                "numero": atual_str("numero"),
+                "idSerie": atual_str("idSerie"),
+                "dataElaboracao": atual_str("dataElaboracao"),
+                "remetente": cls._ids_csv(atual.get("remetente")).split(",")[0],
+            })
+        return payload
+
     async def alterar_documento_interno(
         self,
         id_documento: str,
@@ -633,13 +697,10 @@ class SEIClient:
         """Altera metadados de um documento interno (não o conteúdo).
         Disponível desde mod-wssei 2.0.0 (SEI 4.0.x).
         """
-        payload: dict = {}
-        if descricao:
-            payload["descricao"] = descricao
-        if nivel_acesso:
-            payload["nivelAcesso"] = nivel_acesso
-        if id_hipotese_legal:
-            payload["idHipoteseLegal"] = id_hipotese_legal
+        atual = await self.consultar_documento_interno(id_documento)
+        payload = self._payload_alteracao(
+            atual, descricao, nivel_acesso, id_hipotese_legal, externo=False
+        )
         resp = await self._request(
             "POST", f"/documento/interno/{id_documento}/alterar", data=payload
         )
@@ -664,13 +725,10 @@ class SEIClient:
         conteúdo em memória (`arquivo_bytes` + `nome_arquivo`).
         Disponível desde mod-wssei 2.0.0 (SEI 4.0.x).
         """
-        payload: dict = {}
-        if descricao:
-            payload["descricao"] = descricao
-        if nivel_acesso:
-            payload["nivelAcesso"] = nivel_acesso
-        if id_hipotese_legal:
-            payload["idHipoteseLegal"] = id_hipotese_legal
+        atual = await self.consultar_documento_externo(id_documento)
+        payload = self._payload_alteracao(
+            atual, descricao, nivel_acesso, id_hipotese_legal, externo=True
+        )
 
         if arquivo_path or arquivo_bytes:
             nome, conteudo = self._ler_arquivo(

@@ -163,6 +163,10 @@ Funciona com qualquer instância SEI que tenha o módulo mod-wssei v2 instalado.
 - `SEI_FORM_CHARSET=utf-8` restaura o envio antigo (para instalação que já converta do lado do servidor). O browser transport respeita `content=`; upload multipart via browser segue em UTF-8 (limitação do FormData)
 - Assinatura: `IdUsuario`/`IdOrgao` vêm do `loginData` do mesmo login (o `AssinaturaRN` exige ambos). `_ativar_unidade_geradora` troca para a unidade geradora **só se** o usuário tiver acesso a ela, e é melhor-esforço — documento de outra unidade ou falha de consulta não bloqueiam; o SEI decide. Testes: `tests/test_codificacao_formulario.py`, `tests/test_assinatura_unidade.py`
 
+### Alterar documento APAGA o que não for enviado
+- `MdWsSeiDocumentoRN::encapsulaDocumento` (wssei 3.0.4) grava todos os campos a partir do POST: o que faltar vira nulo/vazio — descrição, nível de acesso ("Nível de acesso local não informado"), hipótese, grau de sigilo, observação, assuntos (lista vazia), interessados, destinatários, tipo de conferência e, no externo, número, série, data de elaboração e remetente
+- `alterar_documento_interno`/`_externo` consultam o documento primeiro e reenviam tudo (`_payload_alteracao`), trocando só o informado. Tornar público limpa hipótese e grau; restrito limpa grau. Testes: `tests/test_alterar_documento_preserva.py`
+
 ### Limitações conhecidas
 - **Cancelar/excluir DOCUMENTO não existe na API**: o mod-wssei (conferido no master, 3.x) não tem rota nem RN para isso — as únicas rotas "cancelar" são `/bloco/assinatura/{id}/disponibilizacao/cancelar` e `/processo/{protocolo}/cancelar/sobrestamento`. Uma minuta indesejada só sai pela interface web (ou pelo scraper, hoje inoperante por SSO). Não há como fechar esse ciclo de erro do agente sem mudança no módulo
 - Cancelar assinatura: a função `DocumentoRN::cancelarAssinaturaInternoControlado` existe no core SEI (linha 4026) mas NÃO está exposta na API REST
