@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import html
 import json
 import logging
 import os
@@ -424,6 +425,11 @@ class SEIClient:
         id_orgao_usuario = login_data.get("IdOrgao") or login_data.get("idOrgao")
         if id_orgao_usuario is not None:
             self._id_orgao_usuario = str(id_orgao_usuario)
+        id_unidade_atual = login_data.get("IdUnidadeAtual") or login_data.get("idUnidadeAtual")
+        if id_unidade_atual is not None:
+            # Login novo = sessão nova no SEI, que volta à unidade padrão.
+            self._unidade_ativa = str(id_unidade_atual)
+            self._cache.pop("unidades_usuario", None)
         logger.info("Autenticação SEI bem-sucedida")
         return self._token
 
@@ -923,11 +929,26 @@ class SEIClient:
         cached = self._cache_get("unidades_usuario")
         if cached is not None:
             return cached
-        resp = await self._request("GET", "/usuario/unidades")
+        await self._get_headers()  # garante login → _id_usuario
+        params = {"usuario": self._id_usuario} if self._id_usuario else None
+        resp = await self._request("GET", "/usuario/unidades", params=params)
         data = resp.json()
         if not data.get("sucesso"):
             raise Exception(f"Erro ao listar unidades: {data.get('mensagem')}")
-        result = data.get("data", [])
+        result = list(data.get("data", []) or [])
+        # MdWsSeiUsuarioRN::listarUnidadesUsuario: sem `usuario` o SIP devolve
+        # TODAS as unidades do sistema (6 mil+ em sei.rr.gov.br); com ele,
+        # devolve as do usuário MENOS a unidade atual da sessão — que é
+        # reposta aqui, marcada como atual.
+        atual = str(self._unidade_ativa or "")
+        if atual and not any(str(u.get("id")) == atual for u in result if isinstance(u, dict)):
+            dados_atual = self._cache_get(f"unidade:{atual}") or {}
+            result.insert(0, {"id": atual, "sigla": dados_atual.get("sigla"),
+                              "nome": dados_atual.get("nome"), "atual": True})
+        for u in result:
+            if isinstance(u, dict):
+                u.setdefault("atual", str(u.get("id")) == atual)
+                self._cache_set(f"unidade:{u.get('id')}", {"sigla": u.get("sigla"), "nome": u.get("nome")})
         self._cache_set("unidades_usuario", result)
         return result
 
@@ -959,6 +980,8 @@ class SEIClient:
         if not data.get("sucesso"):
             raise Exception(f"Erro ao trocar unidade: {data.get('mensagem')}")
         self._unidade_ativa = id_unidade
+        # A lista do SIP omite a unidade atual: com a troca, ela muda.
+        self._cache.pop("unidades_usuario", None)
         return {"mensagem": data.get("mensagem")}
 
     async def pesquisar_unidades(
@@ -2166,15 +2189,41 @@ class SEIClient:
             raise Exception(f"Erro ao listar sobrestamentos: {data.get('mensagem')}")
         return data.get("data", [])
 
-    async def listar_unidades_processo(self, id_procedimento: str) -> list[dict]:
-        """Lista unidades onde o processo está aberto."""
-        resp = await self._request(
-            "GET", f"/processo/listar/unidades/{id_procedimento}"
-        )
+    async def listar_unidades_processo(self, id_procedimento: str) -> dict:
+        """Lista as unidades onde o processo está aberto (e a quem está atribuído).
+
+        A rota `/processo/listar/unidades/{id}` do wssei, apesar do nome, conta
+        processos RELACIONADOS (RelProtocoloProtocolo) e devolve só um número.
+        As unidades de abertura vêm em `dadosAbertura` de `GET /processo/{id}`
+        (MdWsSeiProcedimentoRN::listarUnidadeAberturaProcedimento).
+        """
+        resp = await self._request("GET", f"/processo/{id_procedimento}")
         data = resp.json()
         if not data.get("sucesso"):
-            raise Exception(f"Erro ao listar unidades: {data.get('mensagem')}")
-        return data.get("data", [])
+            raise Exception(f"Erro ao consultar processo: {data.get('mensagem')}")
+        item = data.get("data") or {}
+        if isinstance(item, list):
+            item = item[0] if item else {}
+        atrib = item.get("atributos") if isinstance(item.get("atributos"), dict) else item
+        aberto = atrib.get("dadosAbertura") or {}
+        unidades = aberto.get("unidades") or []
+        lista = aberto.get("lista") or []
+        resultado = []
+        for i, u in enumerate(unidades):
+            rotulo = (lista[i] or {}).get("sigla", "") if i < len(lista) else ""
+            entrada = {"id": str(u.get("id") or ""), "sigla": u.get("nome")}
+            marca = " (atribuído a "
+            if marca in rotulo:
+                entrada["atribuido_a"] = rotulo.split(marca, 1)[1].rstrip(")")
+            elif rotulo and rotulo != u.get("nome"):
+                entrada["usuario"] = rotulo  # processo sigiloso: aberto com o usuário
+            resultado.append(entrada)
+        return {
+            "processo": str(id_procedimento),
+            "info": html.unescape(str(aberto.get("info") or "")),
+            "total": len(resultado),
+            "unidades": resultado,
+        }
 
     async def listar_interessados(self, id_procedimento: str) -> list[dict]:
         """Lista interessados de um processo."""
@@ -2233,9 +2282,30 @@ class SEIClient:
             "GET", f"/processo/verifica/acesso/{id_procedimento}"
         )
         data = resp.json()
-        if not data.get("sucesso"):
-            raise Exception(f"Erro ao verificar acesso: {data.get('mensagem')}")
-        return data.get("data", {})
+        if data.get("sucesso"):
+            return data.get("data", {})
+
+        # A rota do wssei 3.0.x nunca lê `{protocolo}` da URL (a variável fica
+        # indefinida em MdWsSeiServicosV2) e responde "Processo não encontrado"
+        # para qualquer processo. Contorno: a consulta rica do processo aplica
+        # as mesmas regras de acesso do SEI.
+        mensagem = str(data.get("mensagem") or "")
+        if "não encontrado" not in mensagem.lower() and "nao encontrado" not in mensagem.lower():
+            raise Exception(f"Erro ao verificar acesso: {mensagem}")
+        resp2 = await self._request("GET", f"/processo/consultar/{id_procedimento}")
+        dados = resp2.json()
+        if dados.get("sucesso"):
+            rico = dados.get("data") or {}
+            return {
+                "acesso": True,
+                "nivelAcesso": rico.get("nivelAcesso"),
+                "_fonte": "consulta do processo (a rota verifica/acesso do wssei está com defeito)",
+            }
+        return {
+            "acesso": False,
+            "mensagem": html.unescape(str(dados.get("mensagem") or "")),
+            "_fonte": "consulta do processo (a rota verifica/acesso do wssei está com defeito)",
+        }
 
     async def listar_relacionamentos(self, id_procedimento: str) -> list[dict]:
         """Lista processos relacionados.

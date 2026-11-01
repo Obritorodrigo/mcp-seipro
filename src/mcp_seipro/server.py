@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -461,9 +462,38 @@ async def _resolver_processo(client: SEIClient, referencia: str) -> str:
     referencia = referencia.strip()
     # Se contém ponto ou barra, é protocolo formatado
     if "." in referencia or "/" in referencia:
-        proc = await client.consultar_processo(referencia)
-        return str(proc.get("IdProcedimento", ""))
+        ultimo_erro = None
+        for candidato in _variantes_protocolo(referencia):
+            try:
+                proc = await client.consultar_processo(candidato)
+            except Exception as e:  # formato não reconhecido pelo órgão
+                ultimo_erro = e
+                continue
+            id_proc = str((proc or {}).get("IdProcedimento") or "")
+            if id_proc:
+                return id_proc
+        if ultimo_erro:
+            raise ultimo_erro
+        raise ValueError(f"Processo {referencia} não encontrado.")
     return referencia
+
+
+def _variantes_protocolo(referencia: str) -> list[str]:
+    """O número como digitado e com o separador do dígito trocado.
+
+    Cada órgão formata o dígito verificador de um jeito: ANTAQ usa
+    `50300.018905/2018-67`, Roraima `35101.001300/2026.08`. Quem digita
+    costuma usar o formato de outro órgão; a consulta do SEI só acha o exato.
+    """
+    variantes = [referencia]
+    if "/" in referencia:
+        prefixo, sufixo = referencia.rsplit("/", 1)
+        for de, para in (("-", "."), (".", "-")):
+            if de in sufixo:
+                ano, digito = sufixo.rsplit(de, 1)
+                variantes.append(f"{prefixo}/{ano}{para}{digito}")
+                break
+    return variantes
 
 
 def _json(data) -> str:
@@ -513,16 +543,24 @@ def _error(msg: str) -> str:
 
 
 @mcp.tool()
-async def sei_listar_unidades(ctx: Context) -> str:
+async def sei_listar_unidades(filtro: str = "", ctx: Context = None) -> str:
     """Lista as unidades às quais o usuário autenticado tem acesso no SEI.
 
-    Retorna id, sigla e nome de cada unidade. Use o id para trocar
-    de unidade com sei_trocar_unidade.
+    Retorna id, sigla, nome e `atual` (unidade ativa da sessão). Use o id
+    para trocar de unidade com sei_trocar_unidade.
+
+    - filtro: parte da sigla ou do nome (ignora acento e maiúsculas)
     """
     try:
         client = _get_client(ctx)
-        result = await client.listar_unidades_usuario()
-        return _json(result)
+        unidades = await client.listar_unidades_usuario()
+        termos = _normalizar_busca(filtro).split()
+        if termos:
+            unidades = [
+                u for u in unidades
+                if all(t in _normalizar_busca(f"{u.get('sigla', '')} {u.get('nome', '')}") for t in termos)
+            ]
+        return _json({"total": len(unidades), "unidades": unidades})
     except Exception as e:
         return _error(str(e))
 
@@ -1440,7 +1478,11 @@ async def sei_criar_documento(
 
 
 @mcp.tool()
-async def sei_listar_secoes(id_documento: str, ctx: Context = None) -> str:
+async def sei_listar_secoes(
+    id_documento: str,
+    incluir_dinamicas: bool = False,
+    ctx: Context = None,
+) -> str:
     """Lista as seções editáveis de um documento interno SEI.
 
     Aceita o número SEI (protocoloFormatado, ex: 2943731) OU o id interno — a
@@ -1451,12 +1493,24 @@ async def sei_listar_secoes(id_documento: str, ctx: Context = None) -> str:
 
     Retorna as seções com IDs, conteúdo atual (HTML) e a versão do documento
     (campo ultimaVersaoDocumento), necessária para usar sei_editar_secao.
+
+    Seções dinâmicas (cabeçalho com brasão, título, data, rodapé) são geradas
+    pelo SEI e não editáveis; por padrão vêm sem conteúdo (`conteudo_omitido`),
+    pois o brasão em base64 sozinho passa de 700 KB. `incluir_dinamicas=true`
+    devolve tudo. sei_editar_secao não depende desse conteúdo.
     """
     try:
         client = _get_client(ctx)
         doc_id, _ = await _resolver_documento(client, id_documento)
         result = await client.listar_secao_documento(doc_id)
         if isinstance(result, dict):
+            if not incluir_dinamicas:
+                for secao in result.get("secoes") or []:
+                    if isinstance(secao, dict) and secao.get("DinamicaSecaoDocumento") == "S":
+                        tamanho = len(secao.get("conteudo") or "")
+                        if tamanho:
+                            secao["conteudo"] = ""
+                            secao["conteudo_omitido"] = f"seção dinâmica gerada pelo SEI ({tamanho} caracteres)"
             result["_documento_resolvido"] = await _identidade_documento(client, doc_id)
         return _json(result)
     except Exception as e:
@@ -2684,6 +2738,9 @@ async def sei_pesquisar_tipos_documento(
     - limit: quantidade por página
     - pagina: número da página (0=primeira)
 
+    O filtro ignora acentos e maiúsculas e aceita as palavras em qualquer
+    ordem ("oficio circular" encontra "Ofício-Circular").
+
     Use o 'id' retornado como id_serie em sei_criar_documento.
     """
     try:
@@ -2695,7 +2752,42 @@ async def sei_pesquisar_tipos_documento(
             limit=limit,
             start=pagina,
         )
-        return _json(result)
+        termos = _normalizar_busca(filtro).split()
+        if not termos or pagina:
+            return _json(result)
+
+        # A busca do SEI é por substring exata e sensível a acento ("Oficio"
+        # não acha "Ofício"). Completa com a lista inteira comparada
+        # normalizada — lida uma vez e mantida no cache do cliente (1 h).
+        chave = f"tipos_documento:{favoritos}:{aplicabilidade}"
+        todos = client._cache_get(chave)
+        if todos is None:
+            todos = []
+            for pg in range(10):
+                r = await client.pesquisar_tipos_documento(
+                    favoritos=favoritos, aplicabilidade=aplicabilidade, limit=500, start=pg
+                )
+                itens = r.get("tipos") or []
+                todos.extend(itens)
+                if len(itens) < 500:
+                    break
+            client._cache_set(chave, todos)
+
+        vistos = {str(t.get("id")) for t in result.get("tipos") or []}
+        extras = [
+            t for t in todos
+            if str(t.get("id")) not in vistos
+            and all(x in _normalizar_busca(t.get("nome", "")) for x in termos)
+        ]
+        tipos = list(result.get("tipos") or []) + extras
+        tipos = [t for t in tipos if all(x in _normalizar_busca(t.get("nome", "")) for x in termos)]
+        return _json({
+            "tipos": tipos[:limit],
+            "pagina_atual": 0,
+            "itens_pagina": min(len(tipos), limit),
+            "total_itens": len(tipos),
+            "tem_proxima": len(tipos) > limit,
+        })
     except Exception as e:
         return _error(str(e))
 
@@ -2882,7 +2974,11 @@ async def sei_listar_unidades_processo(
     processo: str,
     ctx: Context = None,
 ) -> str:
-    """Lista as unidades onde o processo está aberto."""
+    """Lista as unidades onde o processo está aberto e a quem está atribuído.
+
+    Aceita protocolo formatado ou IdProcedimento. Em processo sigiloso, o SEI
+    informa o usuário com quem está aberto em vez da atribuição.
+    """
     try:
         client = _get_client(ctx)
         id_proc = await _resolver_processo(client, processo)
@@ -3708,6 +3804,71 @@ async def sei_pesquisar_textos_padrao(
 
 
 # -- Documentos --
+
+
+@mcp.tool()
+async def sei_consultar_documento_interno(
+    id_documento: str,
+    ctx: Context = None,
+) -> str:
+    """Consulta metadados de um documento interno (gerado no SEI).
+
+    Aceita o número SEI (protocoloFormatado) ou o id interno. Retorna tipo,
+    número, descrição, nível de acesso, hipótese legal, data de elaboração,
+    observação, assuntos, interessados e destinatários — o que a tela
+    "Consultar/Alterar Documento" mostra. Não traz o texto: para isso use
+    sei_ler_documento.
+
+    Quando o documento é restrito ou sigiloso, a resposta inclui o campo
+    `_aviso_acesso` — aviso INFORMATIVO de privacidade, não erro de permissão.
+    """
+    try:
+        client = _get_client(ctx)
+        doc_id, _ = await _resolver_documento(client, id_documento)
+        bruto = await client.consultar_documento_interno(doc_id)
+
+        def nomes(itens):
+            saida = []
+            for item in itens or []:
+                if isinstance(item, dict):
+                    saida.append({
+                        "id": str(item.get("id") or ""),
+                        "nome": html.unescape(str(item.get("nomeformatado") or item.get("nome")
+                                                  or item.get("descricao") or "")),
+                        **({"codigo": item["codigoestruturadoformatado"]}
+                           if item.get("codigoestruturadoformatado") else {}),
+                    })
+            return saida
+
+        nivel = str(bruto.get("nivelAcesso") or "")
+        result = {
+            "id_documento": str(bruto.get("idDocumento") or doc_id),
+            "nome": html.unescape(str(bruto.get("nomeDocumento") or "")),
+            "id_procedimento": str(bruto.get("protocolo") or ""),
+            "tipo": html.unescape(str(bruto.get("nomeSerie") or "")),
+            "id_serie": str(bruto.get("idSerie") or ""),
+            "numero": bruto.get("numero"),
+            "descricao": html.unescape(str(bruto.get("descricao") or "")),
+            "data_elaboracao": bruto.get("dataElaboracao"),
+            "nivel_acesso": nivel,
+            "nivel_acesso_descricao": access_control.ROTULOS.get(nivel, nivel),
+            "hipotese_legal": bruto.get("nomeHipoteseLegal"),
+            "base_legal": bruto.get("baseLegal"),
+            "observacao": bruto.get("observacao"),
+            "observacoes_outras_unidades": bruto.get("observacoesUnidades") or [],
+            "assuntos": nomes(bruto.get("assuntos")),
+            "interessados": nomes(bruto.get("interessados")),
+            "destinatarios": nomes(bruto.get("destinatarios")),
+        }
+        n, hipotese = access_control.extrair_nivel(bruto)
+        if access_control.precisa_disclaimer(n):
+            result["_aviso_acesso"] = access_control.construir_disclaimer_acompanhante(
+                n, hipotese,
+                alvo={"tipo": "documento", "id": str(doc_id), "tipo_documento": "I"},
+            )
+        return _json(result)
+    except Exception as e:
+        return _error(str(e))
 
 
 @mcp.tool()
@@ -4964,6 +5125,7 @@ _TITULOS_TOOLS = {
     "sei_pesquisar_outras_unidades": "Pesquisar outras unidades",
     "sei_pesquisar_textos_padrao": "Pesquisar textos padrão",
     "sei_consultar_documento_externo": "Consultar documento externo",
+    "sei_consultar_documento_interno": "Consultar documento interno",
     "sei_alterar_documento_interno": "Alterar metadados de documento interno",
     "sei_alterar_documento_externo": "Alterar documento externo",
     "sei_pesquisar_tipos_conferencia": "Pesquisar tipos de conferência",
@@ -5046,6 +5208,67 @@ def _aplicar_tool_annotations() -> None:
 
 
 _aplicar_tool_annotations()
+
+
+def _autor_auditoria() -> dict:
+    """Quem está chamando: sessão OAuth (HTTP) ou SEI_USUARIO (stdio)."""
+    from mcp_seipro import auditoria
+
+    if _http_mode:
+        try:
+            sid, creds = _credenciais_sessao()
+            return auditoria.identificar(sid, creds.get("sei_usuario"))
+        except Exception:
+            return auditoria.identificar(None, None)
+    return auditoria.identificar(None, os.environ.get("SEI_USUARIO"))
+
+
+def _aplicar_auditoria() -> None:
+    """Envolve as tools de ESCRITA para registrar autor, alvo e resultado.
+
+    Usa a mesma classificação das annotations: verbo fora de
+    `_ANNOT_VERBOS_LEITURA` é escrita. O SDK chama `tool.fn(**args, ctx=...)`
+    com os argumentos já validados, então o wrapper não muda o schema.
+    """
+    import functools
+    from mcp_seipro import auditoria
+
+    tools = getattr(getattr(mcp, "_tool_manager", None), "_tools", None) or {}
+    for nome, tool in tools.items():
+        partes = nome.split("_")
+        verbo = partes[1] if len(partes) > 1 else ""
+        if verbo in _ANNOT_VERBOS_LEITURA or getattr(tool.fn, "_auditada", False):
+            continue
+
+        original = tool.fn
+
+        @functools.wraps(original)
+        async def auditada(*args, __nome=nome, __fn=original, **kwargs):
+            inicio = time.monotonic()
+            try:
+                retorno = await __fn(*args, **kwargs)
+            except Exception as e:
+                auditoria.registrar({
+                    **_autor_auditoria(), "tool": __nome,
+                    "args": auditoria.resumir_argumentos(kwargs),
+                    "ok": False, "resultado": {"erro": str(e)[:300]},
+                    "ms": int((time.monotonic() - inicio) * 1000),
+                })
+                raise
+            ok, resumo = auditoria.resumir_resultado(retorno)
+            auditoria.registrar({
+                **_autor_auditoria(), "tool": __nome,
+                "args": auditoria.resumir_argumentos(kwargs),
+                "ok": ok, "resultado": resumo,
+                "ms": int((time.monotonic() - inicio) * 1000),
+            })
+            return retorno
+
+        auditada._auditada = True
+        tool.fn = auditada
+
+
+_aplicar_auditoria()
 
 
 

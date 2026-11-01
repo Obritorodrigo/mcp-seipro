@@ -124,7 +124,7 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 - *"Quais processos da unidade GPF estão sem movimentação há mais de 30 dias?"*
 - *"Compare o conteúdo dos documentos 2843449 e 2843450"*
 
-## Tools disponíveis (117)
+## Tools disponíveis (118)
 
 ### Sistema e metadados (3)
 
@@ -196,7 +196,7 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 | `sei_renunciar_credenciamento` | Renuncia ao próprio acesso |
 | `sei_cassar_credenciamento` | Revoga acesso de um usuário |
 
-### Documentos — leitura (8)
+### Documentos — leitura (9)
 
 | Tool | Descrição |
 |------|-----------|
@@ -205,6 +205,7 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 | `sei_listar_documentos` | Lista documentos com `ordem` (asc/desc), `limite`/`offset` e list view enxuta (`resumido`) |
 | `sei_ler_documento` | Lê documento (HTML ou PDF/OCR) em Markdown |
 | `sei_baixar_anexo` | Baixa documento externo em base64 (max 10MB) |
+| `sei_consultar_documento_interno` | Consulta metadados de documento interno (assuntos, interessados, destinatários, observação) |
 | `sei_consultar_documento_externo` | Consulta metadados de documento externo |
 | `sei_listar_assinaturas` | Lista assinaturas de um documento |
 | `sei_listar_blocos_documento` | Lista blocos de assinatura do documento |

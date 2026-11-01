@@ -27,3 +27,9 @@ def banco_revogacoes_temporario(monkeypatch, tmp_path):
     monkeypatch.setattr(revogacoes, "DB_PATH", caminho)
 
     assert str(caminho).startswith(str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def auditoria_temporaria(monkeypatch, tmp_path):
+    """A auditoria de cada teste vai para um arquivo temporário."""
+    monkeypatch.setenv("SEI_AUDITORIA_LOG", str(tmp_path / "auditoria.jsonl"))

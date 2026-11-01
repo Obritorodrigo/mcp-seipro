@@ -167,6 +167,18 @@ Funciona com qualquer instância SEI que tenha o módulo mod-wssei v2 instalado.
 - `MdWsSeiDocumentoRN::encapsulaDocumento` (wssei 3.0.4) grava todos os campos a partir do POST: o que faltar vira nulo/vazio — descrição, nível de acesso ("Nível de acesso local não informado"), hipótese, grau de sigilo, observação, assuntos (lista vazia), interessados, destinatários, tipo de conferência e, no externo, número, série, data de elaboração e remetente
 - `alterar_documento_interno`/`_externo` consultam o documento primeiro e reenviam tudo (`_payload_alteracao`), trocando só o informado. Tornar público limpa hipótese e grau; restrito limpa grau. Testes: `tests/test_alterar_documento_preserva.py`
 
+### Rotas do wssei 3.0.x com defeito ou nome enganoso (contornadas no cliente)
+- `GET /usuario/unidades` sem `usuario` → o SIP devolve TODAS as unidades do sistema (6.232 em sei.rr.gov.br, ~860 KB). Com `usuario`, devolve as do usuário MENOS a unidade atual da sessão. `listar_unidades_usuario` manda `usuario=_id_usuario` e repõe a atual (`atual: true`); `IdUnidadeAtual` do `loginData` alimenta `_unidade_ativa` já no login (antes só após `trocar_unidade`), e trocar de unidade invalida o cache
+- `GET /processo/verifica/acesso/{protocolo}`: a closure nunca lê `{protocolo}` da rota → sempre "Processo não encontrado!". `verificar_acesso` cai para `GET /processo/consultar/{id}`, que aplica as mesmas regras de acesso
+- `GET /processo/listar/unidades/{id}` conta processos RELACIONADOS (`RelProtocoloProtocolo`) e devolve `{"unidades": N}`. As unidades de abertura vêm de `dadosAbertura` em `GET /processo/{id}`; `listar_unidades_processo` extrai id, sigla e "atribuído a"
+- `sei_listar_secoes` omite por padrão o conteúdo das seções dinâmicas (brasão base64 ≈ 750 KB); `incluir_dinamicas=true` devolve tudo
+- Busca sem acento/ordem (`_normalizar_busca`) também em `sei_pesquisar_tipos_documento` (lista inteira em cache 1 h) e `sei_listar_unidades(filtro=)`. `_resolver_processo` tenta o separador do dígito trocado (`2026-08` ↔ `2026.08`)
+- `sei_consultar_documento_interno`: metadados do documento gerado (assuntos, interessados, destinatários, observação), que antes não tinham tool
+
+### Auditoria (`auditoria.py`)
+- Toda tool de escrita (verbo fora de `_ANNOT_VERBOS_LEITURA`) é envolvida em `_aplicar_auditoria()` e grava uma linha JSON em `SEI_AUDITORIA_LOG` (padrão `/var/lib/sei-pro/auditoria.jsonl`, 0600): ts, usuário SEI, apelido da sessão (sha256 do sid, 12 hex), tool, argumentos, ok/erro, ms
+- Conteúdo e segredo nunca entram (`secoes`, `conteudo`, `arquivo_base64`, `senha`…); textos são truncados. `SEI_AUDITORIA=0` desliga. Rotação: logrotate do host. Testes: `tests/test_auditoria.py`
+
 ### Limitações conhecidas
 - **Cancelar/excluir DOCUMENTO não existe na API**: o mod-wssei (conferido no master, 3.x) não tem rota nem RN para isso — as únicas rotas "cancelar" são `/bloco/assinatura/{id}/disponibilizacao/cancelar` e `/processo/{protocolo}/cancelar/sobrestamento`. Uma minuta indesejada só sai pela interface web (ou pelo scraper, hoje inoperante por SSO). Não há como fechar esse ciclo de erro do agente sem mudança no módulo
 - Cancelar assinatura: a função `DocumentoRN::cancelarAssinaturaInternoControlado` existe no core SEI (linha 4026) mas NÃO está exposta na API REST
