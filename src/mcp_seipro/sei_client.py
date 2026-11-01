@@ -1220,12 +1220,18 @@ class SEIClient:
         return data["data"]
 
     async def pesquisar_hipoteses_legais(
-        self, filtro: str = "", limit: int = 50, start: int = 0
+        self, filtro: str = "", limit: int = 50, start: int = 0, nivel_acesso: str = ""
     ) -> dict:
-        """Pesquisa hipóteses legais para processos/documentos restritos ou sigilosos."""
+        """Pesquisa hipóteses legais para processos/documentos restritos ou sigilosos.
+
+        `nivel_acesso` ("1" restrito, "2" sigiloso) restringe às hipóteses
+        válidas para aquele nível.
+        """
         params: dict = {"limit": limit, "start": start}
         if filtro:
             params["filter"] = filtro
+        if nivel_acesso:
+            params["nivelAcesso"] = nivel_acesso
         resp = await self._request("GET", "/hipoteseLegal/pesquisar", params=params)
         data = resp.json()
         if not data.get("sucesso"):

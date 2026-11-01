@@ -3939,6 +3939,93 @@ async def sei_consultar_documento_externo(
         return _error(str(e))
 
 
+_NIVEIS_ACESSO = {
+    "0": "0", "publico": "0", "público": "0",
+    "1": "1", "restrito": "1",
+    "2": "2", "sigiloso": "2",
+}
+
+
+def _normalizar_nivel(nivel: str) -> str:
+    """Aceita 0/1/2 ou publico/restrito/sigiloso. Vazio = manter."""
+    bruto = str(nivel or "").strip().lower()
+    if not bruto:
+        return ""
+    if bruto not in _NIVEIS_ACESSO and _normalizar_busca(bruto) not in _NIVEIS_ACESSO:
+        raise ValueError(
+            f"Nível de acesso inválido: {nivel!r}. Use publico (0), restrito (1) ou sigiloso (2)."
+        )
+    return _NIVEIS_ACESSO.get(bruto) or _NIVEIS_ACESSO[_normalizar_busca(bruto)]
+
+
+async def _resolver_hipotese(client: SEIClient, nivel: str, hipotese: str) -> tuple[str, dict | None]:
+    """Devolve (id_hipotese, None) ou ("", resposta_para_o_usuario_escolher).
+
+    Restrito e sigiloso exigem hipótese legal. Aceita o id ou parte do nome
+    (sem acento, palavras em qualquer ordem). Sem hipótese, ou com nome
+    ambíguo, nada é alterado: devolve as opções válidas para o nível.
+    """
+    hipotese = str(hipotese or "").strip()
+    if hipotese.isdigit():
+        return hipotese, None
+
+    r = await client.pesquisar_hipoteses_legais(limit=300, nivel_acesso=nivel)
+    opcoes = [
+        {"id": str(h.get("id")), "nome": html.unescape(str(h.get("nome") or "")),
+         "base_legal": html.unescape(str(h.get("baselegal") or ""))}
+        for h in r.get("hipoteses") or [] if isinstance(h, dict)
+    ]
+    rotulo = "restrito" if nivel == "1" else "sigiloso"
+    if hipotese:
+        termos = _normalizar_busca(hipotese).split()
+        achadas = [
+            o for o in opcoes
+            if all(t in _normalizar_busca(f"{o['nome']} {o['base_legal']}") for t in termos)
+        ]
+        if len(achadas) == 1:
+            return achadas[0]["id"], None
+        return "", {
+            "error": (f"Nenhuma hipótese legal corresponde a {hipotese!r}." if not achadas
+                      else f"Mais de uma hipótese legal corresponde a {hipotese!r}."),
+            "hipoteses_disponiveis": achadas or opcoes,
+            "dica": "Nada foi alterado. Informe o `id` da hipótese escolhida em `hipotese_legal`.",
+        }
+    return "", {
+        "error": f"Para tornar o documento {rotulo}, o SEI exige uma hipótese legal.",
+        "hipoteses_disponiveis": opcoes,
+        "dica": "Nada foi alterado. A hipótese é escolha do usuário: repita a chamada "
+                "com o `id` (ou o nome) em `hipotese_legal`.",
+    }
+
+
+async def _alterar_nivel_documento(client, id_documento, descricao, nivel_acesso,
+                                   hipotese_legal, externo: bool, **extra) -> str:
+    """Fluxo comum de sei_alterar_documento_interno/_externo."""
+    doc_id, _ = await _resolver_documento(client, id_documento)
+    nivel = _normalizar_nivel(nivel_acesso)
+    hipotese = str(hipotese_legal or "").strip()
+    if nivel in ("1", "2") or (hipotese and not hipotese.isdigit()):
+        if not nivel:
+            atual = await (client.consultar_documento_externo(doc_id) if externo
+                           else client.consultar_documento_interno(doc_id))
+            nivel = str(atual.get("nivelAcesso") or "")
+        if nivel in ("1", "2"):
+            hipotese, escolha = await _resolver_hipotese(client, nivel, hipotese)
+            if escolha:
+                return _json(escolha)
+    metodo = client.alterar_documento_externo if externo else client.alterar_documento_interno
+    result = await metodo(
+        id_documento=doc_id, descricao=descricao, nivel_acesso=nivel,
+        id_hipotese_legal=hipotese, **extra,
+    )
+    if isinstance(result, dict) and nivel:
+        result["nivel_acesso"] = nivel
+        result["nivel_acesso_descricao"] = access_control.ROTULOS.get(nivel, nivel)
+        if hipotese:
+            result["hipotese_legal"] = hipotese
+    return _json(result)
+
+
 @mcp.tool()
 async def sei_alterar_documento_interno(
     id_documento: str,
@@ -3953,23 +4040,22 @@ async def sei_alterar_documento_interno(
     mudam: os demais (descrição, nível de acesso, assuntos, interessados,
     destinatários, observação) são lidos do documento e reenviados, pois o
     SEI apagaria o que não viesse na alteração.
-    - id_documento: ID interno do documento
+    - id_documento: número SEI ou id interno do documento
     - descricao: nova descrição (vazio = mantém a atual)
-    - nivel_acesso: 0=público, 1=restrito, 2=sigiloso (vazio = mantém)
-    - hipotese_legal: ID da hipótese (obrigatório se restrito/sigiloso)
+    - nivel_acesso: publico, restrito ou sigiloso (ou 0, 1, 2); vazio = mantém
+    - hipotese_legal: id ou parte do nome da hipótese (ex.: "informação pessoal").
+      Obrigatória para restrito/sigiloso: sem ela, ou se o nome for ambíguo,
+      nada é alterado e a resposta lista as hipóteses válidas para o nível,
+      para o usuário escolher. Ao tornar público, a hipótese é removida.
 
     Disponível desde mod-wssei 2.0.0 (SEI 4.0.x).
     Se falhar com erro inesperado, use sei_versao para verificar a versão instalada.
     """
     try:
         client = _get_client(ctx)
-        result = await client.alterar_documento_interno(
-            id_documento=id_documento,
-            descricao=descricao,
-            nivel_acesso=nivel_acesso,
-            id_hipotese_legal=hipotese_legal,
+        return await _alterar_nivel_documento(
+            client, id_documento, descricao, nivel_acesso, hipotese_legal, externo=False,
         )
-        return _json(result)
     except Exception as e:
         return _error(str(e))
 
@@ -3991,10 +4077,13 @@ async def sei_alterar_documento_externo(
     número, tipo, data de elaboração, remetente, assuntos, interessados,
     destinatários, observação) são lidos do documento e reenviados, pois o
     SEI apagaria o que não viesse na alteração.
-    - id_documento: ID interno do documento
+    - id_documento: número SEI ou id interno do documento
     - descricao: nova descrição (vazio = mantém a atual)
-    - nivel_acesso: 0=público, 1=restrito, 2=sigiloso (vazio = mantém)
-    - hipotese_legal: ID da hipótese (obrigatório se restrito/sigiloso)
+    - nivel_acesso: publico, restrito ou sigiloso (ou 0, 1, 2); vazio = mantém
+    - hipotese_legal: id ou parte do nome da hipótese (ex.: "informação pessoal").
+      Obrigatória para restrito/sigiloso: sem ela, ou se o nome for ambíguo,
+      nada é alterado e a resposta lista as hipóteses válidas para o nível,
+      para o usuário escolher. Ao tornar público, a hipótese é removida.
     - arquivo_base64 + nome_arquivo: novo arquivo para substituir (opcional)
     - arquivo_path: caminho de novo arquivo NO SERVIDOR do MCP (opcional; só
       no modo local/stdio — desabilitado no servidor remoto)
@@ -4015,16 +4104,10 @@ async def sei_alterar_documento_externo(
                 return _error(erro)
 
         client = _get_client(ctx)
-        result = await client.alterar_documento_externo(
-            id_documento=id_documento,
-            descricao=descricao,
-            nivel_acesso=nivel_acesso,
-            id_hipotese_legal=hipotese_legal,
-            arquivo_path=arquivo_path,
-            arquivo_bytes=conteudo,
-            nome_arquivo=nome_arquivo,
+        return await _alterar_nivel_documento(
+            client, id_documento, descricao, nivel_acesso, hipotese_legal, externo=True,
+            arquivo_path=arquivo_path, arquivo_bytes=conteudo, nome_arquivo=nome_arquivo,
         )
-        return _json(result)
     except Exception as e:
         return _error(str(e))
 
