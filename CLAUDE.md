@@ -186,6 +186,10 @@ Funciona com qualquer instância SEI que tenha o módulo mod-wssei v2 instalado.
 - Toda tool de escrita (verbo fora de `_ANNOT_VERBOS_LEITURA`) é envolvida em `_aplicar_auditoria()` e grava uma linha JSON em `SEI_AUDITORIA_LOG` (padrão `/var/lib/sei-pro/auditoria.jsonl`, 0600): ts, usuário SEI, apelido da sessão (sha256 do sid, 12 hex), tool, argumentos, ok/erro, ms
 - Conteúdo e segredo nunca entram (`secoes`, `conteudo`, `arquivo_base64`, `senha`…); textos são truncados. `SEI_AUDITORIA=0` desliga. Rotação: logrotate do host. Testes: `tests/test_auditoria.py`
 
+### Limite de uso e página de status
+- `limites.py`: janela deslizante de 60 s por sessão OAuth (sid), em memória. `SEI_LIMITE_POR_MINUTO` (60) para toda tool e `SEI_LIMITE_ESCRITAS_POR_MINUTO` (20) para as de escrita; `0` desliga. `_aplicar_limites()` envolve TODAS as tools por fora da auditoria: bloqueada não chega ao SEI, não consome cota e, se for escrita, vai para a auditoria como `"ok": "bloqueado_limite"`. Resposta traz `erro_origem: "limite_de_uso"`
+- `GET /status` (público, sem dados de usuário): versão, início, sessões ativas (sids distintos na cache), chamadas nos últimos 5 min, limites e o SEI testado pela rota pública `/orgao/listar` — sem credencial, cache de 30 s para a página não virar amplificador contra o SEI. Testes: `tests/test_limites_e_status.py`
+
 ### Limitações conhecidas
 - **Cancelar/excluir DOCUMENTO não existe na API**: o mod-wssei (conferido no master, 3.x) não tem rota nem RN para isso — as únicas rotas "cancelar" são `/bloco/assinatura/{id}/disponibilizacao/cancelar` e `/processo/{protocolo}/cancelar/sobrestamento`. Uma minuta indesejada só sai pela interface web (ou pelo scraper, hoje inoperante por SSO). Não há como fechar esse ciclo de erro do agente sem mudança no módulo
 - Cancelar assinatura: a função `DocumentoRN::cancelarAssinaturaInternoControlado` existe no core SEI (linha 4026) mas NÃO está exposta na API REST

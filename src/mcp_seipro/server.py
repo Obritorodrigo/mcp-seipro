@@ -5638,6 +5638,108 @@ def _aplicar_auditoria() -> None:
 _aplicar_auditoria()
 
 
+def _chave_limite() -> str:
+    """Cota por sessão OAuth (HTTP) ou única (stdio)."""
+    if _http_mode:
+        try:
+            sid, _ = _credenciais_sessao()
+            return sid
+        except Exception:
+            return "anonimo"
+    return "local"
+
+
+def _aplicar_limites() -> None:
+    """Envolve TODAS as tools com o limite de uso por usuário (limites.py).
+
+    Fica por fora da auditoria: chamada bloqueada não chega ao SEI, mas a
+    escrita bloqueada é registrada na auditoria como "bloqueado_limite".
+    """
+    import functools
+    from mcp_seipro import auditoria, limites
+
+    tools = getattr(getattr(mcp, "_tool_manager", None), "_tools", None) or {}
+    for nome, tool in tools.items():
+        if getattr(tool.fn, "_limitada", False):
+            continue
+        partes = nome.split("_")
+        escrita = (partes[1] if len(partes) > 1 else "") not in _ANNOT_VERBOS_LEITURA
+        original = tool.fn
+
+        @functools.wraps(original)
+        async def limitada(*args, __nome=nome, __fn=original, __escrita=escrita, **kwargs):
+            bloqueio = limites.registrar(_chave_limite(), __escrita)
+            if bloqueio:
+                if __escrita:
+                    auditoria.registrar({
+                        **_autor_auditoria(), "tool": __nome,
+                        "args": auditoria.resumir_argumentos(kwargs),
+                        "ok": "bloqueado_limite", "resultado": {"motivo": bloqueio},
+                    })
+                return _json({"error": bloqueio, "erro_origem": "limite_de_uso"})
+            return await __fn(*args, **kwargs)
+
+        limitada._limitada = True
+        limitada._auditada = getattr(original, "_auditada", False)
+        tool.fn = limitada
+
+
+_aplicar_limites()
+
+
+_INICIO_SERVIDOR = time.time()
+_STATUS_SEI_CACHE: dict = {}
+
+
+async def _status_sei() -> dict:
+    """Testa o SEI pela rota pública /orgao/listar (sem credencial), com cache de 30 s."""
+    agora = time.monotonic()
+    if _STATUS_SEI_CACHE and agora - _STATUS_SEI_CACHE["em"] < 30:
+        return _STATUS_SEI_CACHE["dados"]
+    url = os.environ.get("SEI_URL", "").rstrip("/")
+    if not url:
+        dados = {"configurado": False}
+    else:
+        import httpx
+        from urllib.parse import urlparse
+
+        inicio = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as cli:
+                r = await cli.get(f"{url}/orgao/listar")
+            dados = {"host": urlparse(url).hostname, "acessivel": r.status_code == 200,
+                     "http": r.status_code, "ms": int((time.monotonic() - inicio) * 1000)}
+        except Exception as e:
+            dados = {"host": urlparse(url).hostname, "acessivel": False,
+                     "erro": type(e).__name__, "ms": int((time.monotonic() - inicio) * 1000)}
+    _STATUS_SEI_CACHE.update({"em": agora, "dados": dados})
+    return dados
+
+
+async def _pagina_status() -> dict:
+    """Situação do servidor, sem dados de usuário (página pública)."""
+    from importlib import metadata
+    from mcp_seipro import limites
+
+    try:
+        versao = metadata.version("mcp-seipro")
+    except metadata.PackageNotFoundError:
+        versao = "desconhecida"
+    sessoes = {chave[1] for chave in _cache_clientes if chave[0] == "rest"}
+    return {
+        "servico": "ok",
+        "versao": versao,
+        "no_ar_desde": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_INICIO_SERVIDOR)),
+        "sessoes_ativas": len(sessoes),
+        "chamadas_ultimos_5_min": limites.chamadas_recentes(),
+        "limites_por_usuario": {
+            "chamadas_por_minuto": limites.limite_chamadas() or "sem limite",
+            "escritas_por_minuto": limites.limite_escritas() or "sem limite",
+        },
+        "sei": await _status_sei(),
+    }
+
+
 
 def main():
     if _http_mode:
@@ -5683,6 +5785,13 @@ def main():
         app.routes.insert(2, Route("/icon.png", favicon, methods=["GET"]))
         app.routes.insert(3, Route("/login", login_page, methods=["GET"]))
         app.routes.insert(4, Route("/login", login_submit, methods=["POST"]))
+
+        from starlette.responses import JSONResponse
+
+        async def status_page(request):
+            return JSONResponse(await _pagina_status(), headers={"Cache-Control": "no-store"})
+
+        app.routes.insert(5, Route("/status", status_page, methods=["GET"]))
 
         config = uvicorn.Config(
             app,

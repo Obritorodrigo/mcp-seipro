@@ -33,3 +33,13 @@ def banco_revogacoes_temporario(monkeypatch, tmp_path):
 def auditoria_temporaria(monkeypatch, tmp_path):
     """A auditoria de cada teste vai para um arquivo temporário."""
     monkeypatch.setenv("SEI_AUDITORIA_LOG", str(tmp_path / "auditoria.jsonl"))
+
+
+@pytest.fixture(autouse=True)
+def limites_zerados():
+    """Cada teste começa sem chamadas contadas no limitador de uso."""
+    from mcp_seipro import limites
+
+    limites.limpar()
+    yield
+    limites.limpar()
