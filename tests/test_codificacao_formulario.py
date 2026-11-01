@@ -98,3 +98,30 @@ def test_browser_transport_usa_content_ja_serializado():
     corpo, ctype = BrowserClient._encode_body(b"cargo=Administra%E7%E3o", None)
     assert corpo == "cargo=Administra%E7%E3o"
     assert ctype == "application/x-www-form-urlencoded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metodo,rota", [
+    ("anotar_documento_bloco_assinatura", "/bloco/assinatura/anotacao/cadastrar"),
+    ("alterar_anotacao_bloco_assinatura", "/bloco/assinatura/anotacao/alterar"),
+])
+async def test_anotacao_bloco_assinatura_usa_campo_anotacao(metodo, rota):
+    # MdWsSeiServicosV2 lê `anotacao` (setStrAnotacao); `descricao` era ignorado.
+    enviados = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        enviados.append(request)
+        return httpx.Response(200, json={"sucesso": True, "data": {}})
+
+    c = _cliente()
+    c._token = "t"
+    c._client = httpx.AsyncClient(transport=httpx.MockTransport(responder))
+    try:
+        await getattr(c, metodo)("10", "20", "Anotação revisada")
+    finally:
+        await c.close()
+
+    assert enviados[0].url.path.endswith(rota)
+    f = _decodificar(enviados[0].content)
+    assert f["anotacao"] == "Anotação revisada"
+    assert "descricao" not in f

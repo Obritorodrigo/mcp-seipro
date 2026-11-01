@@ -1952,7 +1952,7 @@ class SEIClient:
         """
         resp = await self._request(
             "POST", "/bloco/assinatura/anotacao/cadastrar",
-            data={"bloco": id_bloco, "documento": documento, "descricao": descricao},
+            data={"bloco": id_bloco, "documento": documento, "anotacao": descricao},
         )
         data = resp.json()
         if not data.get("sucesso"):
@@ -1967,7 +1967,7 @@ class SEIClient:
         """
         resp = await self._request(
             "POST", "/bloco/assinatura/anotacao/alterar",
-            data={"bloco": id_bloco, "documento": documento, "descricao": descricao},
+            data={"bloco": id_bloco, "documento": documento, "anotacao": descricao},
         )
         data = resp.json()
         if not data.get("sucesso"):
