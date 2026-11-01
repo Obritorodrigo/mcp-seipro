@@ -57,11 +57,8 @@ def obter_cliente_atual() -> ClienteAutenticado:
         # DEVEM devolver a mesma representação textual de sgp_abrir_pagina.
         abrir=lambda caminho: estado.abrir_pagina(caminho),
 
-        # Envio autorizado APENAS para os dois formulários GET de pesquisa.
-        # Deve devolver o texto equivalente a sgp_enviar_formulario.
-        enviar=lambda numero, campos, botao: estado.enviar_formulario(
-            formulario=numero, campos=campos, botao=botao
-        ),
+        # A extensão faz a pesquisa por GET direto nos endpoints já mapeados;
+        # não depende do estado do último formulário nem executa POST.
 
         # A MESMA sessão autenticada; é opcional até ativar leitura PDF.
         # Não criar requests.Session nova: não carregaria o login atual.
@@ -72,7 +69,7 @@ integrar_sgp2rr(mcp, obter_cliente_atual)
 ~~~
 
 ATENÇÃO: recuperar_estado_sgp_da_requisicao_mcp(), estado.abrir_pagina(),
-estado.enviar_formulario(), estado.autenticado e estado.sessao_http são
+estado.autenticado e estado.sessao_http são
 **nomes ilustrativos**. Não basta copiar esse bloco sem vinculá-los à
 implementação real. Se o servidor usa funções ASYNC/await, as oito tools
 desta primeira versão ainda são SÍNCRONAS e exigem adaptação do wrapper;
@@ -83,7 +80,7 @@ não execute coroutines com asyncio.run() dentro de um event loop ativo.
 1. Executar testes locais na cópia de homologação.
 2. Confirmar que todas as chamadas passam pela autenticação OAuth de cada
    usuário e não reutilizam a sessão de outro usuário.
-3. Garantir que o envio de formulário opera apenas sobre os endpoints GET
+3. Conferir que a pesquisa direta navega apenas pelos endpoints GET
    pesquisa_resultadoVULGO.php e Ficha_Menu.php. Nenhum POST de gravação.
 4. Confirmar que a sessão HTTP para PDFs é a mesma do usuário e que redirects
    externos são recusados (o módulo usa allow_redirects=False).
