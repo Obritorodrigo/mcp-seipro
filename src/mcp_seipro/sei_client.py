@@ -62,6 +62,15 @@ class SEIClient:
         # (outra conversa, a tela do SEI…). Sem o cabeçalho, outra sessão da
         # mesma pessoa muda a unidade desta no meio de uma operação.
         self._unidade_escolhida: Optional[str] = None
+        # Unidade de trabalho lembrada entre sessões (preferencias.py). É
+        # aplicada logo após o login; se o SEI recusar, é descartada.
+        from mcp_seipro import preferencias
+        self._chave_preferencias = preferencias.chave_usuario(
+            self.base_url, self._orgao, self._usuario
+        )
+        self._unidade_preferida: Optional[str] = (
+            preferencias.unidade(self._chave_preferencias) if self._usuario else None
+        )
         # Charset dos campos de formulário. O wssei repassa os campos crus ao
         # núcleo do SEI, que grava em ISO-8859-1: UTF-8 vira "Ã§" no banco.
         # "utf-8" restaura o comportamento antigo para instalações que já
@@ -445,6 +454,7 @@ class SEIClient:
             # escolheu outra, o cabeçalho `unidade` a impõe em cada requisição.
             self._unidade_ativa = self._unidade_escolhida or str(id_unidade_atual)
             self._cache.pop("unidades_usuario", None)
+        await self._aplicar_unidade_preferida(str(id_unidade_atual or ""))
         logger.info("Autenticação SEI bem-sucedida")
         return self._token
 
@@ -1028,6 +1038,46 @@ class SEIClient:
         if not data.get("sucesso"):
             raise Exception(f"Erro ao pesquisar usuários: {data.get('mensagem')}")
         return self._paginated(data, "usuarios", data.get("data", []), start, limit)
+
+    async def _aplicar_unidade_preferida(self, unidade_do_login: str) -> None:
+        """Na primeira autenticação da sessão, passa para a unidade preferida.
+
+        Usa o token recém-emitido direto (sem _request, que chamaria o login de
+        novo). Se o SEI recusar — o usuário perdeu acesso à unidade, por
+        exemplo —, a preferência é apagada e vale a unidade do login.
+        """
+        preferida = self._unidade_preferida
+        self._unidade_preferida = None  # tenta só uma vez por cliente
+        if not preferida or self._unidade_escolhida or preferida == unidade_do_login:
+            if preferida and preferida == unidade_do_login and not self._unidade_escolhida:
+                self._unidade_escolhida = preferida
+            return
+        try:
+            corpo = self._formulario({"unidade": preferida})
+            corpo.setdefault("headers", {})["token"] = self._token
+            resp = await self._client.post(f"{self.base_url}/usuario/alterar/unidade", **corpo)
+            dados = resp.json()
+        except Exception:
+            logger.warning("Falha ao aplicar a unidade preferida", exc_info=True)
+            return
+        if dados.get("sucesso"):
+            self._unidade_escolhida = preferida
+            self._unidade_ativa = preferida
+            self._cache.pop("unidades_usuario", None)
+            logger.info("Unidade de trabalho lembrada aplicada")
+        else:
+            from mcp_seipro import preferencias
+            preferencias.salvar_unidade(self._chave_preferencias, None)
+
+    def _formulario(self, dados: dict) -> dict:
+        kwargs = {"data": dados}
+        self._codificar_formulario(kwargs)
+        return kwargs
+
+    def lembrar_unidade(self, id_unidade: str) -> None:
+        """Grava a unidade como preferida deste usuário (escolha explícita)."""
+        from mcp_seipro import preferencias
+        preferencias.salvar_unidade(self._chave_preferencias, id_unidade)
 
     async def trocar_unidade(self, id_unidade: str) -> dict:
         """Troca a unidade ativa do usuário."""

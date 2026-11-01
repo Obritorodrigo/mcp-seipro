@@ -566,16 +566,42 @@ async def sei_listar_unidades(filtro: str = "", ctx: Context = None) -> str:
 
 
 @mcp.tool()
-async def sei_trocar_unidade(id_unidade: str, ctx: Context) -> str:
-    """Troca a unidade ativa do usuário no SEI.
+async def sei_trocar_unidade(id_unidade: str, ctx: Context = None) -> str:
+    """Troca a unidade ativa do usuário no SEI e a lembra para as próximas sessões.
 
-    Após trocar, operações como sei_listar_processos mostrarão
-    a caixa da nova unidade. Use sei_listar_unidades para ver
-    as unidades disponíveis e seus IDs.
+    Aceita o id da unidade (ex.: "110001335") ou a sigla (ex.: "SEJUC/DEPLAF",
+    sem diferenciar acento/maiúsculas). A unidade escolhida vira a unidade de
+    trabalho deste usuário: as próximas conversas já começam nela. Use
+    sei_listar_unidades para ver as disponíveis.
     """
     try:
         client = _get_client(ctx)
-        result = await client.trocar_unidade(id_unidade)
+        alvo = str(id_unidade).strip()
+        sigla = None
+        if not alvo.isdigit():
+            unidades = await client.listar_unidades_usuario()
+            procurado = _normalizar_busca(alvo)
+            exatas = [u for u in unidades if _normalizar_busca(str(u.get("sigla") or "")) == procurado]
+            if len(exatas) != 1:
+                parecidas = [u for u in unidades
+                             if procurado in _normalizar_busca(f"{u.get('sigla', '')} {u.get('nome', '')}")]
+                if len(parecidas) == 1:
+                    exatas = parecidas
+                else:
+                    return _json({
+                        "error": (f"Unidade {alvo!r} não encontrada entre as suas." if not parecidas
+                                  else f"Mais de uma unidade corresponde a {alvo!r}."),
+                        "unidades_disponiveis": parecidas or unidades,
+                        "dica": "Nada foi alterado. Informe o `id` ou a sigla exata.",
+                    })
+            alvo, sigla = str(exatas[0].get("id")), exatas[0].get("sigla")
+        result = await client.trocar_unidade(alvo)
+        client.lembrar_unidade(alvo)
+        if isinstance(result, dict):
+            result["id_unidade"] = alvo
+            if sigla:
+                result["sigla"] = sigla
+            result["lembrada"] = True
         return _json(result)
     except Exception as e:
         return _error(str(e))

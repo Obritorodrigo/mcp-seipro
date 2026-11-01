@@ -43,3 +43,9 @@ def limites_zerados():
     limites.limpar()
     yield
     limites.limpar()
+
+
+@pytest.fixture(autouse=True)
+def preferencias_temporarias(monkeypatch, tmp_path):
+    """Preferências de unidade de cada teste em arquivo temporário."""
+    monkeypatch.setenv("SEI_PREFERENCIAS_PATH", str(tmp_path / "preferencias.json"))
