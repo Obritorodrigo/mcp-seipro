@@ -265,3 +265,68 @@ async def test_consultar_documento_interno(monkeypatch):
     assert r["interessados"][0]["nome"] == "Fulano (FUL)"
     assert r["nivel_acesso_descricao"] == "Restrito"
     assert "_aviso_acesso" in r
+
+
+# --- correções após o teste ao vivo -------------------------------------------
+
+@pytest.mark.asyncio
+async def test_tipos_documento_converte_pagina_em_posicao():
+    # /documento/tipo/pesquisar: `start` é posição 1-based (array_slice($a, $start-1)).
+    chamadas = []
+    c = _cliente({("GET", "/documento/tipo/pesquisar"): {"sucesso": True, "data": [], "total": 0}}, chamadas)
+    try:
+        await c.pesquisar_tipos_documento(limit=50, start=0)
+        await c.pesquisar_tipos_documento(limit=50, start=2)
+    finally:
+        await c.close()
+    starts = [parse_qs(urlparse(str(r.url)).query)["start"][0] for r in chamadas]
+    assert starts == ["1", "101"]
+
+
+@pytest.mark.asyncio
+async def test_tipos_documento_sem_repeticao_quando_paginas_se_sobrepoem(monkeypatch):
+    # Reproduz o visto ao vivo: páginas sobrepostas repetiam "Ofício-Circular" 5x.
+    todos = [{"id": str(i), "nome": f"Tipo {i}"} for i in range(600)] + [
+        {"id": "292", "nome": "Ofício-Circular"}, {"id": "1142", "nome": "Ofício-Circular Conjunto"}]
+
+    class C:
+        _cache = {}
+
+        def _cache_get(self, k):
+            return self._cache.get(k)
+
+        def _cache_set(self, k, v):
+            self._cache[k] = v
+
+        async def pesquisar_tipos_documento(self, filtro="", favoritos="", aplicabilidade="", limit=50, start=0):
+            if filtro:
+                return {"tipos": [t for t in todos if filtro in t["nome"]]}
+            pagina = todos[start * limit:(start + 1) * limit]
+            # o mesmo tipo aparecendo em mais de uma página (visto ao vivo)
+            return {"tipos": pagina + [{"id": "292", "nome": "Ofício-Circular"}]}
+
+    monkeypatch.setattr(srv, "_get_client", lambda ctx: C())
+    r = json.loads(await srv.sei_pesquisar_tipos_documento(filtro="oficio circular", ctx=CTX))
+    assert [t["id"] for t in r["tipos"]] == ["292", "1142"]
+
+
+@pytest.mark.asyncio
+async def test_unidade_atual_ganha_sigla_e_nome_da_lista_geral(monkeypatch):
+    import mcp_seipro.sei_client as mod
+    monkeypatch.setattr(mod, "_UNIDADES_SISTEMA", {})
+
+    def unidades(request):
+        q = parse_qs(urlparse(str(request.url)).query)
+        if "usuario" in q:  # lista do usuário: sem a unidade atual
+            return {"sucesso": True, "data": [{"id": "110001335", "sigla": "SEJUC/DEPLAF", "nome": "Deplaf"}]}
+        return {"sucesso": True, "data": [  # lista geral do órgão
+            {"id": "110005930", "sigla": "SEJUC/DEPLAF/X", "nome": "Unidade X"},
+            {"id": "110001335", "sigla": "SEJUC/DEPLAF", "nome": "Deplaf"}]}
+
+    c = _cliente({("GET", "/usuario/unidades"): unidades})
+    c._unidade_ativa = "110005930"
+    try:
+        lista = await c.listar_unidades_usuario()
+    finally:
+        await c.close()
+    assert lista[0] == {"id": "110005930", "sigla": "SEJUC/DEPLAF/X", "nome": "Unidade X", "atual": True}

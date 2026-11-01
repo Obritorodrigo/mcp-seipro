@@ -2762,14 +2762,16 @@ async def sei_pesquisar_tipos_documento(
         chave = f"tipos_documento:{favoritos}:{aplicabilidade}"
         todos = client._cache_get(chave)
         if todos is None:
-            todos = []
+            todos, ids = [], set()
             for pg in range(10):
                 r = await client.pesquisar_tipos_documento(
                     favoritos=favoritos, aplicabilidade=aplicabilidade, limit=500, start=pg
                 )
                 itens = r.get("tipos") or []
-                todos.extend(itens)
-                if len(itens) < 500:
+                novos = [t for t in itens if str(t.get("id")) not in ids]
+                ids.update(str(t.get("id")) for t in novos)
+                todos.extend(novos)
+                if len(itens) < 500 or not novos:
                     break
             client._cache_set(chave, todos)
 
@@ -2779,8 +2781,12 @@ async def sei_pesquisar_tipos_documento(
             if str(t.get("id")) not in vistos
             and all(x in _normalizar_busca(t.get("nome", "")) for x in termos)
         ]
-        tipos = list(result.get("tipos") or []) + extras
-        tipos = [t for t in tipos if all(x in _normalizar_busca(t.get("nome", "")) for x in termos)]
+        tipos, vistos = [], set()
+        for t in list(result.get("tipos") or []) + extras:
+            ident = str(t.get("id"))
+            if ident not in vistos and all(x in _normalizar_busca(t.get("nome", "")) for x in termos):
+                vistos.add(ident)
+                tipos.append(t)
         return _json({
             "tipos": tipos[:limit],
             "pagina_atual": 0,

@@ -40,6 +40,10 @@ class SEIAcessoNegado(Exception):
         self.origem = "sei"
 
 
+# base_url -> (instante, {id_unidade: {sigla, nome}}) — ver SEIClient._dados_unidade
+_UNIDADES_SISTEMA: dict[str, tuple[float, dict]] = {}
+
+
 class SEIClient:
     """Cliente REST assíncrono para qualquer instância do SEI com mod-wssei v2."""
 
@@ -942,7 +946,7 @@ class SEIClient:
         # reposta aqui, marcada como atual.
         atual = str(self._unidade_ativa or "")
         if atual and not any(str(u.get("id")) == atual for u in result if isinstance(u, dict)):
-            dados_atual = self._cache_get(f"unidade:{atual}") or {}
+            dados_atual = self._cache_get(f"unidade:{atual}") or await self._dados_unidade(atual)
             result.insert(0, {"id": atual, "sigla": dados_atual.get("sigla"),
                               "nome": dados_atual.get("nome"), "atual": True})
         for u in result:
@@ -951,6 +955,31 @@ class SEIClient:
                 self._cache_set(f"unidade:{u.get('id')}", {"sigla": u.get("sigla"), "nome": u.get("nome")})
         self._cache_set("unidades_usuario", result)
         return result
+
+    async def _dados_unidade(self, id_unidade: str) -> dict:
+        """Sigla e nome de uma unidade qualquer do órgão.
+
+        O loginData só traz `IdUnidadeAtual`, e a lista do usuário omite a
+        unidade atual. A lista completa (`/usuario/unidades` sem `usuario`,
+        milhares de unidades) é dado público do órgão: lida uma vez por hora e
+        compartilhada entre os clientes do mesmo SEI.
+        """
+        agora = time.monotonic()
+        entrada = _UNIDADES_SISTEMA.get(self.base_url)
+        if entrada is None or agora - entrada[0] > 3600:
+            try:
+                resp = await self._request("GET", "/usuario/unidades")
+                data = resp.json()
+                mapa = {
+                    str(u.get("id")): {"sigla": u.get("sigla"), "nome": u.get("nome")}
+                    for u in (data.get("data") or []) if isinstance(u, dict)
+                } if data.get("sucesso") else {}
+            except Exception:
+                logger.debug("Falha ao ler a lista geral de unidades", exc_info=True)
+                mapa = {}
+            entrada = (agora, mapa)
+            _UNIDADES_SISTEMA[self.base_url] = entrada
+        return entrada[1].get(str(id_unidade), {})
 
     async def pesquisar_usuarios(
         self, filtro: str = "", id_orgao: str = "", limit: int = 50, start: int = 0
@@ -1374,8 +1403,14 @@ class SEIClient:
     ) -> dict:
         """Pesquisa tipos de documento (séries) disponíveis.
         Retorna: {data: [{id, nome}, ...], total: N}
+
+        `start` aqui é a PÁGINA (0 = primeira), como nas demais buscas do
+        cliente. Nesta rota o wssei trata `start` como POSIÇÃO 1-based do
+        primeiro item (`array_slice($arr, $start - 1)`), então convertemos;
+        mandar a página crua sobrepunha as páginas (página 1 = página 0
+        deslocada de um item).
         """
-        params: dict = {"limit": limit, "start": start}
+        params: dict = {"limit": limit, "start": start * limit + 1}
         if filtro:
             params["filter"] = filtro
         if favoritos:
