@@ -26,5 +26,5 @@ jobs:
       - name: Compile and run offline unit tests
         run: |
           cd integrations/sgp2rr-canaime/server-extension
-          python -m compileall -q sgp2rr_search.py sgp2rr_tools.py
+          python -m compileall -q sgp2rr_search.py sgp2rr_tools.py sgp2rr_integration.py sgp2rr_server_bridge.py prepare_integration.py
           python -m unittest discover -s tests -v
