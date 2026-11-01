@@ -2004,7 +2004,8 @@ class SEIClient:
         return data.get("data", {"mensagem": data.get("mensagem")})
 
     async def pesquisar_blocos_assinatura(
-        self, filtro: str = "", limit: int = 50, start: int = 0, estado: str = ""
+        self, filtro: str = "", limit: int = 50, start: int = 0, estado: str = "",
+        id_bloco: str = "",
     ) -> dict:
         """Pesquisa blocos de assinatura (da unidade e disponibilizados a ela).
 
@@ -2016,6 +2017,8 @@ class SEIClient:
             params["filter"] = filtro
         if estado:
             params["estado"] = estado
+        if id_bloco:
+            params["id"] = id_bloco
         resp = await self._request("GET", "/bloco/assinatura/pesquisar", params=params)
         data = resp.json()
         if not data.get("sucesso"):

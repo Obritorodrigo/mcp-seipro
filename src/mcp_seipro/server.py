@@ -1935,6 +1935,49 @@ async def _vincular_referencias(client: SEIClient, conteudo: str, cache: dict,
     return "".join(partes)
 
 
+async def _erro_documento_em_bloco(ctx, id_documento: str, erro: Exception) -> str:
+    """Erro de escrita com contexto quando o documento está em bloco disponibilizado.
+
+    O SEI só diz "Documento disponibilizado em bloco de assinatura". Aqui se
+    acrescenta QUAL bloco, para quem foi disponibilizado e o caminho para
+    editar — que tira o documento da fila de quem vai assinar, então é decisão
+    do usuário, não do agente.
+    """
+    msg = str(erro)
+    if "bloco de assinatura" not in msg.lower():
+        return _error(msg)
+    blocos = []
+    try:
+        client = _get_client(ctx)
+        doc_id, _ = await _resolver_documento(client, id_documento)
+        dados = await client.listar_blocos_documento(doc_id)
+        ids = dados.get("blocos") if isinstance(dados, dict) else [b.get("id") for b in dados or []]
+        for id_bloco in ids or []:
+            info = {"id": str(id_bloco)}
+            try:
+                r = await client.pesquisar_blocos_assinatura(id_bloco=str(id_bloco), limit=1)
+                if r.get("blocos"):
+                    resumo = _bloco_assinatura_resumido(r["blocos"][0])
+                    info.update({k: resumo[k] for k in
+                                 ("descricao", "estado_descricao", "unidade", "disponibilizado_para")})
+            except Exception:
+                pass
+            blocos.append(info)
+    except Exception:
+        logger.debug("Não foi possível detalhar o bloco do documento", exc_info=True)
+    return _json({
+        "error": msg,
+        "erro_origem": "documento_em_bloco_de_assinatura",
+        "blocos": blocos,
+        "como_editar": (
+            "Nada foi alterado. Para editar: (1) sei_cancelar_disponibilizacao_bloco — o "
+            "documento sai temporariamente da fila de quem vai assinar; (2) faça a edição; "
+            "(3) sei_disponibilizar_bloco_assinatura para devolvê-lo. Confirme com o "
+            "usuário antes, pois afeta quem está com o bloco para assinar."
+        ),
+    })
+
+
 @mcp.tool()
 async def sei_editar_secao(
     id_documento: str,
@@ -2208,7 +2251,7 @@ async def sei_editar_secao(
             out["_avisos"] = avisos
         return _json(out)
     except Exception as e:
-        return _error(str(e))
+        return await _erro_documento_em_bloco(ctx, id_documento, e)
 
 
 # ---------------------------------------------------------------------------
@@ -4496,7 +4539,7 @@ async def sei_alterar_documento_interno(
             client, id_documento, descricao, nivel_acesso, hipotese_legal, externo=False,
         )
     except Exception as e:
-        return _error(str(e))
+        return await _erro_documento_em_bloco(ctx, id_documento, e)
 
 
 @mcp.tool()
@@ -4548,7 +4591,7 @@ async def sei_alterar_documento_externo(
             arquivo_path=arquivo_path, arquivo_bytes=conteudo, nome_arquivo=nome_arquivo,
         )
     except Exception as e:
-        return _error(str(e))
+        return await _erro_documento_em_bloco(ctx, id_documento, e)
 
 
 @mcp.tool()
