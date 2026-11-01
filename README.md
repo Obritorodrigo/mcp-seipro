@@ -124,7 +124,7 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 - *"Quais processos da unidade GPF estão sem movimentação há mais de 30 dias?"*
 - *"Compare o conteúdo dos documentos 2843449 e 2843450"*
 
-## Tools disponíveis (121)
+## Tools disponíveis (126)
 
 ### Sistema e metadados (3)
 
@@ -152,6 +152,11 @@ Com o MCP SEI Pro configurado, basta conversar com o Claude em linguagem natural
 |------|-----------|
 | `sei_listar_pendencias` | Resumo do dia: prazos, não lidos, documento novo, atribuídos a mim, blocos de assinatura e documentos sem assinatura |
 | `sei_listar_prazos` | Processos com retorno programado ou marcador com data, vencidos ou vencendo |
+| `sei_buscar_prazos_no_texto` | Encontra prazos escritos nos documentos ("até 04/11/2026", "no prazo de 5 dias úteis") |
+| `sei_marcar_prazo` | Registra um prazo no processo com um marcador existente da unidade |
+| `sei_consultar_modelo_documento` | Sugestões do SEI para criar documento do tipo (assuntos, interessados, destinatários) |
+| `sei_consultar_modelo_processo` | Sugestões do SEI para criar processo do tipo (assuntos, níveis, hipótese) |
+| `sei_assinar_documentos` | Assina vários documentos avulsos de uma vez, conferindo cada um |
 | `sei_listar_processos` | Lista caixa da unidade via scraper web (~23× mais rápido que REST). Suporta `apenas_meus`, `tipo`, `filtro` |
 | `sei_pesquisar_processos` | Pesquisa por texto, descrição, datas, unidade geradora, assunto ou grupo de acompanhamento |
 | `sei_consultar_processo` | **Híbrido**: REST (especificacao, assuntos, interessados, observacoes) + Web (lista de documentos da árvore) em paralelo |

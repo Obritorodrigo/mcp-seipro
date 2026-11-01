@@ -190,6 +190,14 @@ Funciona com qualquer instância SEI que tenha o módulo mod-wssei v2 instalado.
 - Fonte: itens de `/processo/listar` (caixa da unidade, `start` = página de 50). Prazo = `status.retornoData.dataProgramada` (retorno programado; `MdWsSeiProcedimentoRN` também dá `retornoAtrasado`) ou a 1ª data dd/mm/aaaa no texto/nome de um marcador. "Hoje" no fuso `SEI_FUSO_HORARIO` (padrão America/Sao_Paulo)
 - Pendências: não lidos = `processoAcessadoUnidade == "N"`; documento novo = `documentoNovo == "S"`; atribuídos a mim = `atribuido_unidade_atual` (shaping) com `id_usuario` = `_id_usuario` ou nome = `loginData.nome`; blocos `A,D,R` com documentos (origem "da unidade" × "recebido de outra unidade"); documentos internos da unidade sem assinatura nos N processos mais recentes (uma consulta por processo, 4 em paralelo). Somente leitura. Testes: `tests/test_prazos_pendencias.py`
 
+### Assinatura em lote, modelos, prazos no texto e marcar prazo
+- `sei_assinar_documentos`: `POST /documento/assinar/bloco` (`apiAssinarDocumentos`, `arrDocumento` = ids separados por vírgula) — assina documentos AVULSOS, sem bloco. Ativa a unidade do 1º documento, resolve o cargo e confere depois, por `listar_assinaturas`, se cada um recebeu a assinatura
+- `sei_consultar_modelo_documento` / `_processo`: `GET /documento/tipo/template` (`id`, `procedimento`) e `GET /processo/tipo/template` (`id`) — sugestões do órgão para o tipo
+- `sei_buscar_prazos_no_texto`: lê os N documentos internos mais recentes (HTML) e extrai datas junto de "até/prazo/data-limite…", datas por extenso e "no prazo de N dias (úteis)" contados da `dataElaboracao`. Não grava nada
+- `sei_marcar_prazo`: usa marcador EXISTENTE (padrão "Prazo"); texto "Prazo: dd/mm/aaaa – descrição", que `_prazo_do_processo` reconhece. Não cria marcador sozinho (muda a lista da unidade)
+- Pendências: minutas sem assinatura ganham `criado_em`/`dias_sem_assinatura` (via `consultar_documento_interno`, até 40) e vêm das mais antigas para as mais novas. Testes: `tests/test_lote_modelos_prazos.py`
+- Rotas do wssei 3.0.4 deliberadamente NÃO usadas: `/documento/incluir` (rota de teste com dados fixos), `/documento/linkedicao` (link preso à sessão PHP do servidor), `/bloco/{id}/anotacao` (duplica as anotações por tipo), `/acompanhamentoespecial/listar` (equivalente às listagens já usadas), `/processo/identificacao/acesso` (pede a senha de novo para sigiloso)
+
 ### Auditoria (`auditoria.py`)
 - Toda tool de escrita (verbo fora de `_ANNOT_VERBOS_LEITURA`) é envolvida em `_aplicar_auditoria()` e grava uma linha JSON em `SEI_AUDITORIA_LOG` (padrão `/var/lib/sei-pro/auditoria.jsonl`, 0600): ts, usuário SEI, apelido da sessão (sha256 do sid, 12 hex), tool, argumentos, ok/erro, ms
 - Conteúdo e segredo nunca entram (`secoes`, `conteudo`, `arquivo_base64`, `senha`…); textos são truncados. `SEI_AUDITORIA=0` desliga. Rotação: logrotate do host. Testes: `tests/test_auditoria.py`

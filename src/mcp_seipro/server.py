@@ -5499,6 +5499,7 @@ async def _documentos_sem_assinatura(client: SEIClient, processos: list[dict],
             if (a.get("tipoDocumento") == "I" and str(a.get("idUnidade")) == str(unidade)
                     and st.get("documentoAssinado") == "N" and st.get("documentoCancelado") != "S"):
                 achados.append({
+                    "_id": str(d.get("id") or a.get("idProtocolo") or ""),
                     "documento": html.unescape(str(a.get("nomeComposto") or "")),
                     "numero_sei": a.get("protocoloFormatado"),
                     "descricao": html.unescape(str(a.get("informacao") or "")),
@@ -5506,6 +5507,25 @@ async def _documentos_sem_assinatura(client: SEIClient, processos: list[dict],
                 })
 
     await asyncio.gather(*(examinar(b) for b in processos[:maximo]))
+
+    # Idade de cada minuta: a listagem não traz data; a consulta do documento traz.
+    from datetime import datetime
+    hoje = _hoje()
+
+    async def datar(item):
+        async with sem:
+            try:
+                meta = await client.consultar_documento_interno(item["_id"])
+                criado = datetime.strptime(str(meta.get("dataElaboracao")), "%d/%m/%Y").date()
+                item["criado_em"] = criado.strftime("%d/%m/%Y")
+                item["dias_sem_assinatura"] = (hoje - criado).days
+            except Exception:
+                pass
+
+    await asyncio.gather(*(datar(i) for i in achados[:40]))
+    for item in achados:
+        item.pop("_id", None)
+    achados.sort(key=lambda i: -(i.get("dias_sem_assinatura") or 0))
     return achados
 
 
@@ -5596,6 +5616,317 @@ async def sei_listar_pendencias(
             "documentos_sem_assinatura": sem_assinatura,
             "_nota": (f"Documentos sem assinatura conferidos nos {min(verificar_documentos, len(processos))} "
                       "processos mais recentes da caixa."),
+        })
+    except Exception as e:
+        return _error(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Assinatura em lote, modelos de criação, prazos no texto e marcar prazo
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def sei_assinar_documentos(
+    documentos: str,
+    cargo: str = "",
+    ctx: Context = None,
+) -> str:
+    """Assina vários documentos avulsos de uma vez, sem precisar de bloco.
+
+    Parâmetros:
+    - documentos: números SEI (ou ids internos) separados por vírgula ou espaço
+    - cargo: id (ex.: "7376") ou nome do cargo. Sem cargo — ou ambíguo — nada
+      é assinado e a resposta lista os cargos disponíveis.
+
+    Os documentos precisam ser da mesma unidade: ela é ativada antes de assinar.
+    A resposta confere, documento a documento, se a assinatura entrou.
+    """
+    try:
+        client = _get_client(ctx)
+        referencias = [r for r in re.split(r"[,\s;]+", documentos or "") if r.strip()]
+        if not referencias:
+            return _error("Informe ao menos um documento.")
+        ids, nomes = [], {}
+        for ref in referencias:
+            doc_id, _ = await _resolver_documento(client, ref)
+            ids.append(doc_id)
+            nomes[doc_id] = ref
+        if not cargo:
+            return await _pedir_cargo(client)
+
+        await client._get_headers()
+        if not client._id_usuario:
+            await client.autenticar()
+        if not client._id_usuario:
+            return _error("Assinatura não enviada: a autenticação do SEI não informou o IdUsuario.")
+        unidade_ativada = await _ativar_unidade_geradora(client, ids[0])
+        cargo, escolha = await _resolver_cargo(client, cargo)
+        if escolha:
+            return escolha
+
+        resultado = await client.assinar_documentos(
+            ids, login=client._usuario, senha=client._senha, cargo=cargo,
+            orgao=str(client._id_orgao_usuario or client._orgao or ""),
+            id_usuario=str(client._id_usuario),
+        )
+        conferencia = []
+        for doc_id in ids:
+            try:
+                assinaturas = await client.listar_assinaturas(doc_id)
+                assinado = any(_normalizar_busca(a.get("cargo") or "") == _normalizar_busca(cargo)
+                               for a in assinaturas or [] if isinstance(a, dict))
+            except Exception:
+                assinado = None
+            conferencia.append({"documento": nomes[doc_id], "id": doc_id, "assinado": assinado})
+        saida = {"resultado": resultado, "cargo": cargo, "documentos": conferencia}
+        if unidade_ativada:
+            saida["_unidade_ativada"] = unidade_ativada
+        return _json(saida)
+    except Exception as e:
+        return _error(str(e))
+
+
+async def _resolver_tipo_processo(client: SEIClient, tipo: str) -> tuple[str, str]:
+    tipo = str(tipo or "").strip()
+    if tipo.isdigit():
+        return tipo, ""
+    r = await client.pesquisar_tipos_processo(limit=500)
+    tipos = r.get("tipos") or r.get("tipos_processo") or r.get("data") or []
+    alvo = _normalizar_busca(tipo)
+    exatos = [t for t in tipos if _normalizar_busca(t.get("nome", "")) == alvo]
+    parecidos = exatos or [t for t in tipos if all(x in _normalizar_busca(t.get("nome", "")) for x in alvo.split())]
+    if len(parecidos) == 1:
+        return str(parecidos[0]["id"]), parecidos[0].get("nome", "")
+    raise ValueError(
+        f"Tipo de processo {tipo!r} " + ("não encontrado." if not parecidos else "ambíguo: ")
+        + ", ".join(f"{t.get('nome')} (id {t.get('id')})" for t in parecidos[:10])
+    )
+
+
+@mcp.tool()
+async def sei_consultar_modelo_documento(
+    tipo: str,
+    processo: str = "",
+    ctx: Context = None,
+) -> str:
+    """O que o SEI sugere ao criar um documento do tipo: assuntos, se aceita
+    interessados/destinatários e demais regras do tipo no órgão.
+
+    - tipo: id ou nome do tipo de documento (ex.: "Ofício")
+    - processo: opcional; algumas sugestões dependem do processo
+    """
+    try:
+        client = _get_client(ctx)
+        id_serie, nome = (str(tipo).strip(), "") if str(tipo).strip().isdigit() \
+            else await _resolver_tipo_documento(client, tipo)
+        id_proc = await _resolver_processo(client, processo) if processo else ""
+        dados = await client.modelo_documento(id_serie, id_proc)
+        return _json({"tipo": nome or id_serie, "id_serie": id_serie, "modelo": dados})
+    except Exception as e:
+        return _error(str(e))
+
+
+@mcp.tool()
+async def sei_consultar_modelo_processo(tipo: str, ctx: Context = None) -> str:
+    """O que o SEI sugere ao criar um processo do tipo: assuntos padrão, níveis
+    de acesso permitidos e hipótese legal sugerida.
+
+    - tipo: id ou nome do tipo de processo (ex.: "Aquisição de Material Permanente")
+    """
+    try:
+        client = _get_client(ctx)
+        id_tipo, nome = await _resolver_tipo_processo(client, tipo)
+        dados = await client.modelo_processo(id_tipo)
+        return _json({"tipo": nome or id_tipo, "id_tipo_processo": id_tipo, "modelo": dados})
+    except Exception as e:
+        return _error(str(e))
+
+
+_MESES = {"janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4, "maio": 5, "junho": 6, "julho": 7,
+          "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12}
+_RE_PRAZO_DATA = re.compile(
+    r"(at[eé]|prazo|data[- ]limite|impreterivelmente|no dia|vencimento)[^.;]{0,80}?"
+    r"(\d{1,2})[/.](\d{1,2})[/.](\d{4})", re.I)
+_RE_PRAZO_EXTENSO = re.compile(
+    r"(at[eé]|prazo|data[- ]limite|no dia)[^.;]{0,60}?(\d{1,2})\s+de\s+([a-zç]+)\s+de\s+(\d{4})", re.I)
+_RE_PRAZO_RELATIVO = re.compile(
+    r"(?:no\s+)?prazo\s+(?:m[aá]ximo\s+)?de\s+(\d{1,3})\s*(?:\([^)]{0,30}\)\s*)?dias?(\s+[uú]teis)?", re.I)
+
+
+def _somar_dias(inicio, dias: int, uteis: bool):
+    from datetime import timedelta
+    if not uteis:
+        return inicio + timedelta(days=dias)
+    atual, faltam = inicio, dias
+    while faltam > 0:
+        atual += timedelta(days=1)
+        if atual.weekday() < 5:
+            faltam -= 1
+    return atual
+
+
+def _prazos_no_texto(texto: str, data_documento=None) -> list[dict]:
+    """Datas de prazo citadas num texto, com o trecho de onde saíram."""
+    from datetime import date
+
+    achados = []
+    plano = " ".join(texto.split())
+    sem_acento = _normalizar_busca(plano)
+
+    def trecho(ini, fim):
+        return plano[max(0, ini - 60):min(len(plano), fim + 40)].strip()
+
+    for m in _RE_PRAZO_DATA.finditer(plano):
+        try:
+            alvo = date(int(m.group(4)), int(m.group(3)), int(m.group(2)))
+        except ValueError:
+            continue
+        achados.append({"data": alvo, "tipo": "data", "trecho": trecho(m.start(), m.end())})
+    for m in _RE_PRAZO_EXTENSO.finditer(sem_acento):
+        mes = _MESES.get(m.group(3))
+        if not mes:
+            continue
+        try:
+            alvo = date(int(m.group(4)), mes, int(m.group(2)))
+        except ValueError:
+            continue
+        achados.append({"data": alvo, "tipo": "data por extenso", "trecho": trecho(m.start(), m.end())})
+    if data_documento:
+        for m in _RE_PRAZO_RELATIVO.finditer(plano):
+            uteis = bool(m.group(2))
+            alvo = _somar_dias(data_documento, int(m.group(1)), uteis)
+            achados.append({"data": alvo, "tipo": f"{m.group(1)} dias{' úteis' if uteis else ''} a partir do documento",
+                            "trecho": trecho(m.start(), m.end())})
+    vistos, unicos = set(), []
+    for a in achados:
+        if a["data"] not in vistos:
+            vistos.add(a["data"])
+            unicos.append(a)
+    return unicos
+
+
+@mcp.tool()
+async def sei_buscar_prazos_no_texto(
+    processo: str,
+    documentos: int = 5,
+    ctx: Context = None,
+) -> str:
+    """Procura prazos escritos no texto dos documentos mais recentes de um processo.
+
+    Encontra "até 04/11/2026", "prazo: 04/11/2026", "até 4 de novembro de 2026"
+    e "no prazo de 5 (cinco) dias úteis" (contado da data do documento). Útil
+    quando o prazo não foi programado no SEI, só escrito num ofício. Para que
+    ele passe a aparecer em sei_listar_prazos, use sei_marcar_prazo.
+    Somente leitura; lê só documentos gerados no SEI (HTML).
+
+    - processo: número do processo ou IdProcedimento
+    - documentos: quantos documentos, a partir do mais recente (padrão 5)
+    """
+    try:
+        from datetime import datetime
+
+        client = _get_client(ctx)
+        hoje = _hoje()
+        id_proc = await _resolver_processo(client, processo)
+        dados = await client.listar_documentos_todos(id_proc)
+        internos = [d for d in dados.get("documentos") or []
+                    if (d.get("atributos") or {}).get("tipoDocumento") == "I"
+                    and ((d.get("atributos") or {}).get("status") or {}).get("documentoCancelado") != "S"]
+        sugestoes = []
+        for d in internos[-documentos:][::-1]:
+            a = d.get("atributos") or {}
+            doc_id = str(d.get("id") or a.get("idProtocolo") or "")
+            try:
+                bruto = await client.visualizar_documento_interno(doc_id)
+            except Exception:
+                continue
+            data_doc = None
+            try:
+                meta = await client.consultar_documento_interno(doc_id)
+                data_doc = datetime.strptime(str(meta.get("dataElaboracao")), "%d/%m/%Y").date()
+            except Exception:
+                pass
+            for p in _prazos_no_texto(html_to_text(bruto), data_doc):
+                dias = (p["data"] - hoje).days
+                sugestoes.append({
+                    "prazo": p["data"].strftime("%d/%m/%Y"),
+                    "dias_restantes": dias,
+                    "situacao": ("vencido há %d dia(s)" % -dias if dias < 0
+                                 else "vence hoje" if dias == 0 else "vence em %d dia(s)" % dias),
+                    "como_achado": p["tipo"],
+                    "trecho": p["trecho"],
+                    "documento": html.unescape(str(a.get("nomeComposto") or "")),
+                    "numero_sei": a.get("protocoloFormatado"),
+                })
+        sugestoes.sort(key=lambda x: x["dias_restantes"])
+        return _json({
+            "processo": processo,
+            "documentos_lidos": min(documentos, len(internos)),
+            "prazos_encontrados": sugestoes,
+            "dica": "Confira o trecho antes de usar. Para registrar o prazo no processo, use sei_marcar_prazo.",
+        })
+    except Exception as e:
+        return _error(str(e))
+
+
+@mcp.tool()
+async def sei_marcar_prazo(
+    processo: str,
+    data: str,
+    descricao: str = "",
+    marcador: str = "Prazo",
+    ctx: Context = None,
+) -> str:
+    """Registra um prazo no processo com um marcador da unidade.
+
+    O texto do marcador fica "Prazo: dd/mm/aaaa – descrição", e o prazo passa
+    a aparecer em sei_listar_prazos e sei_listar_pendencias.
+
+    - processo: número do processo ou IdProcedimento
+    - data: dd/mm/aaaa
+    - descricao: o que vence (ex.: "resposta à SELC")
+    - marcador: nome (ou id) de um marcador EXISTENTE da unidade; padrão "Prazo".
+      Se não existir, nada é feito e a resposta lista os marcadores da unidade
+      (criar marcador muda a lista de toda a unidade — decisão do usuário).
+    """
+    try:
+        from datetime import datetime
+
+        client = _get_client(ctx)
+        try:
+            alvo = datetime.strptime(str(data).strip(), "%d/%m/%Y").date()
+        except ValueError:
+            return _error("Data inválida: use dd/mm/aaaa (ex.: 04/11/2026).")
+        id_proc = await _resolver_processo(client, processo)
+
+        id_marcador, nome_marcador = str(marcador).strip(), str(marcador).strip()
+        if not id_marcador.isdigit():
+            r = await client.pesquisar_marcadores(limit=200)
+            marcadores = r.get("marcadores") or r.get("data") or []
+            alvo_nome = _normalizar_busca(marcador)
+            achados = [m for m in marcadores if _normalizar_busca(str(m.get("nome") or "")) == alvo_nome] \
+                or [m for m in marcadores if alvo_nome in _normalizar_busca(str(m.get("nome") or ""))]
+            if len(achados) != 1:
+                return _json({
+                    "error": (f"Não há marcador {marcador!r} na unidade." if not achados
+                              else f"Mais de um marcador corresponde a {marcador!r}."),
+                    "marcadores_disponiveis": [{"id": m.get("id"), "nome": m.get("nome")}
+                                               for m in (achados or marcadores)],
+                    "dica": "Nada foi feito. Escolha um marcador existente (parâmetro `marcador`) "
+                            "ou peça para criar um com sei_criar_marcador.",
+                })
+            id_marcador, nome_marcador = str(achados[0].get("id")), str(achados[0].get("nome"))
+
+        texto = f"Prazo: {alvo.strftime('%d/%m/%Y')}" + (f" – {descricao.strip()}" if descricao.strip() else "")
+        resultado = await client.marcar_processo(id_proc, id_marcador, texto)
+        dias = (alvo - _hoje()).days
+        return _json({
+            "resultado": resultado,
+            "processo": processo,
+            "marcador": nome_marcador,
+            "texto": texto,
+            "situacao": ("vencido há %d dia(s)" % -dias if dias < 0
+                         else "vence hoje" if dias == 0 else "vence em %d dia(s)" % dias),
         })
     except Exception as e:
         return _error(str(e))
@@ -5990,6 +6321,11 @@ _TITULOS_TOOLS = {
     "sei_pesquisar_blocos_assinatura": "Pesquisar blocos de assinatura",
     "sei_pesquisar_blocos_internos": "Pesquisar blocos internos",
     "sei_listar_prazos": "Listar prazos da unidade",
+    "sei_assinar_documentos": "Assinar vários documentos",
+    "sei_consultar_modelo_documento": "Consultar modelo de tipo de documento",
+    "sei_consultar_modelo_processo": "Consultar modelo de tipo de processo",
+    "sei_buscar_prazos_no_texto": "Buscar prazos no texto dos documentos",
+    "sei_marcar_prazo": "Marcar prazo no processo",
     "sei_listar_pendencias": "Listar pendências da unidade",
     "sei_criar_anotacao": "Criar anotação no processo",
     "sei_versao": "Versão do SEI e do wssei",

@@ -1482,6 +1482,49 @@ class SEIClient:
             raise Exception(f"Erro ao assinar documento: {data.get('mensagem')}")
         return data.get("data", {"mensagem": data.get("mensagem")})
 
+    async def assinar_documentos(
+        self, ids_documentos: list[str], login: str, senha: str, cargo: str,
+        orgao: str = "", id_usuario: str = "",
+    ) -> dict:
+        """Assina vários documentos avulsos numa chamada (POST /documento/assinar/bloco).
+
+        `MdWsSeiDocumentoRN::apiAssinarDocumentos` recebe `arrDocumento` como
+        ids separados por vírgula — não exige bloco de assinatura.
+        """
+        payload = {
+            "arrDocumento": ",".join(str(i) for i in ids_documentos),
+            "orgao": orgao or self._orgao,
+            "cargo": cargo,
+            "login": login,
+            "senha": senha,
+        }
+        if id_usuario:
+            payload["usuario"] = id_usuario
+        resp = await self._request("POST", "/documento/assinar/bloco", data=payload)
+        data = resp.json()
+        if not data.get("sucesso"):
+            raise Exception(f"Erro ao assinar documentos: {data.get('mensagem')}")
+        return data.get("data") or {"mensagem": data.get("mensagem")}
+
+    async def modelo_documento(self, id_serie: str, id_procedimento: str = "") -> dict:
+        """O que o SEI sugere ao criar documento do tipo (GET /documento/tipo/template)."""
+        params = {"id": id_serie}
+        if id_procedimento:
+            params["procedimento"] = id_procedimento
+        resp = await self._request("GET", "/documento/tipo/template", params=params)
+        data = resp.json()
+        if not data.get("sucesso"):
+            raise Exception(f"Erro ao consultar modelo do tipo de documento: {data.get('mensagem')}")
+        return data.get("data") or {}
+
+    async def modelo_processo(self, id_tipo_processo: str) -> dict:
+        """O que o SEI sugere ao criar processo do tipo (GET /processo/tipo/template)."""
+        resp = await self._request("GET", "/processo/tipo/template", params={"id": id_tipo_processo})
+        data = resp.json()
+        if not data.get("sucesso"):
+            raise Exception(f"Erro ao consultar modelo do tipo de processo: {data.get('mensagem')}")
+        return data.get("data") or {}
+
     async def pesquisar_tipos_documento(
         self,
         filtro: str = "",
