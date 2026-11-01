@@ -320,3 +320,22 @@ def test_tools_recusam_arquivo_path_em_modo_http(monkeypatch):
     ):
         out = json.loads(_run(coro))
         assert "desabilitado" in json.dumps(out, ensure_ascii=False)
+
+
+def test_login_preenche_url_e_orgao_do_servidor(monkeypatch):
+    monkeypatch.setenv("SEI_URL", "https://sei.rr.gov.br/sei/modulos/wssei/controlador_ws.php/api/v2")
+    monkeypatch.setenv("SEI_ORGAO", "16")
+    sid = _pendente()
+    r = _app().get(f"/login?session={sid}")
+    assert r.status_code == 200
+    assert 'value="https://sei.rr.gov.br/sei/modulos/wssei/controlador_ws.php/api/v2"' in r.text
+    assert 'name="sei_orgao" value="16"' in r.text
+
+
+def test_login_sem_env_mantem_campos_vazios(monkeypatch):
+    monkeypatch.delenv("SEI_URL", raising=False)
+    monkeypatch.delenv("SEI_ORGAO", raising=False)
+    sid = _pendente()
+    r = _app().get(f"/login?session={sid}")
+    assert 'name="sei_url" type="url" required value=""' in r.text
+    assert 'name="sei_orgao" value="0"' in r.text

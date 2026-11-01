@@ -524,9 +524,11 @@ def _render_login(session: str, pending: dict, erro: str = "", valores: dict | N
         "cliente": _e(pending.get("client_name") or "(sem nome)"),
         "destino": _e(destino),
         "erro": f'<div class="erro">{_e(erro)}</div>' if erro else "",
-        "sei_url": _e(valores.get("sei_url", "")),
+        # SEI_URL / SEI_ORGAO do servidor pré-preenchem o formulário: numa
+        # instância de um órgão só, o usuário digita apenas login e senha.
+        "sei_url": _e(valores.get("sei_url", os.environ.get("SEI_URL", ""))),
         "sei_usuario": _e(valores.get("sei_usuario", "")),
-        "sei_orgao": _e(valores.get("sei_orgao", "0")),
+        "sei_orgao": _e(valores.get("sei_orgao", os.environ.get("SEI_ORGAO", "0") or "0")),
     }), status)
 
 
@@ -565,7 +567,7 @@ async def login_submit(request: Request):
         "sei_url": str(form.get("sei_url", "")).strip(),
         "sei_usuario": str(form.get("sei_usuario", "")).strip(),
         "sei_senha": str(form.get("sei_senha", "")),
-        "sei_orgao": str(form.get("sei_orgao", "0")).strip() or "0",
+        "sei_orgao": str(form.get("sei_orgao", "")).strip() or os.environ.get("SEI_ORGAO", "0") or "0",
         "sei_verify_ssl": verify_ssl,
     }
 
