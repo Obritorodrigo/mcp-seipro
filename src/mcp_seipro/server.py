@@ -35,29 +35,17 @@ MAX_BINARY_SIZE = 10 * 1024 * 1024  # 10 MB
 # Detecta modo HTTP (Railway injeta PORT)
 _http_mode = bool(os.environ.get("PORT"))
 _http_port = int(os.environ.get("PORT", 8000))
+# Atrás de proxy reverso na mesma máquina, 127.0.0.1. Em container, use HOST=0.0.0.0.
+_http_host = os.environ.get("HOST", "127.0.0.1")
 
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     if _http_mode:
-        # Cada sessao OAuth possui clientes REST e web independentes.
-        clientes_rest = {}
-        clientes_web = {}
-
-        try:
-            yield {"sei": clientes_rest, "sei_web": clientes_web}
-        finally:
-            for client in list(clientes_rest.values()):
-                try:
-                    await client.close()
-                except Exception:
-                    logger.exception("Erro ao encerrar cliente SEI REST")
-
-            for client in list(clientes_web.values()):
-                try:
-                    await client.close()
-                except Exception:
-                    logger.exception("Erro ao encerrar cliente SEI Web")
+        # Modo HTTP stateless: o SDK recria este contexto a CADA request, então
+        # ele não serve de cache. Os clientes por sessão OAuth vivem em
+        # `_cache_clientes` (nível de módulo) — ver `_obter_cliente_sessao`.
+        yield {"sei": None, "sei_web": None}
     else:
         # Modo stdio: clients com credenciais das env vars
         client = SEIClient()
@@ -105,21 +93,98 @@ def _credenciais_sessao():
     return sid, creds
 
 
-def _get_client(ctx: Context) -> SEIClient:
-    """Retorna cliente REST isolado por sessão OAuth."""
-    clientes = ctx.request_context.lifespan_context["sei"]
+# ---------------------------------------------------------------------------
+# Cache de clientes por sessão OAuth (modo HTTP)
+# ---------------------------------------------------------------------------
+# Sem cache, cada chamada de tool criaria um SEIClient novo e faria um login
+# novo no SEI. A chave combina tipo + sid + hash das credenciais: duas sessões
+# nunca compartilham cliente, e uma sessão cujas credenciais mudem ganha outro.
+# Revogação continua valendo: `_credenciais_sessao` reabre o token a cada
+# chamada, então uma sessão revogada nem chega a consultar o cache.
 
-    if not _http_mode:
-        return clientes
+_CACHE_TTL = float(os.environ.get("SEI_CLIENT_CACHE_TTL", "600"))
+_CACHE_MAX = int(os.environ.get("SEI_CLIENT_CACHE_MAX", "200"))
+_CACHE_GRACA_FECHAR = 120.0  # s antes de fechar um cliente despejado
+
+# chave -> [ultimo_uso (monotonic), cliente]
+_cache_clientes: dict[tuple[str, str, str], list] = {}
+
+
+def _hash_credenciais(creds: dict) -> str:
+    import hashlib
+
+    bruto = json.dumps(creds, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(bruto).hexdigest()
+
+
+def _fechar_depois(cliente) -> None:
+    """Fecha o cliente despejado após uma carência.
+
+    A carência evita fechar um cliente que uma request concorrente ainda está
+    usando (ex.: despejo por limite de tamanho sob carga).
+    """
+    fechar = getattr(cliente, "close", None)
+    if fechar is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    def _agendar():
+        async def _fechar():
+            try:
+                await fechar()
+            except Exception:
+                logger.debug("Erro ao fechar cliente SEI despejado", exc_info=True)
+        loop.create_task(_fechar())
+
+    loop.call_later(_CACHE_GRACA_FECHAR, _agendar)
+
+
+def _podar_cache(agora: float) -> None:
+    for chave, (ultimo_uso, cliente) in list(_cache_clientes.items()):
+        if agora - ultimo_uso > _CACHE_TTL:
+            del _cache_clientes[chave]
+            _fechar_depois(cliente)
+    excesso = len(_cache_clientes) - (_CACHE_MAX - 1)
+    if excesso > 0:
+        mais_antigos = sorted(_cache_clientes.items(), key=lambda kv: kv[1][0])[:excesso]
+        for chave, (_, cliente) in mais_antigos:
+            del _cache_clientes[chave]
+            _fechar_depois(cliente)
+
+
+def _obter_cliente_sessao(tipo: str, fabrica):
+    """Devolve o cliente (`tipo` = 'rest' | 'web') da sessão OAuth corrente."""
+    import time as _time
 
     sid, creds = _credenciais_sessao()
+    chave = (tipo, sid, _hash_credenciais(creds))
+    agora = _time.monotonic()
 
-    client = clientes.get(sid)
-    if client is None:
-        client = SEIClient(**creds, permitir_arquivo_local=False)
-        clientes[sid] = client
+    entrada = _cache_clientes.get(chave)
+    if entrada is not None and agora - entrada[0] > _CACHE_TTL:
+        entrada = None  # expirado: _podar_cache o fecha logo abaixo
+    if entrada is None:
+        entrada = [agora, fabrica(creds)]
+    else:
+        entrada[0] = agora
+    _podar_cache(agora)  # antes de reinserir: o atual nunca é despejado
+    _cache_clientes[chave] = entrada
+    return entrada[1]
 
-    return client
+
+def _get_client(ctx: Context) -> SEIClient:
+    """Retorna o cliente REST: das env vars (stdio) ou da sessão OAuth (HTTP)."""
+    if not _http_mode:
+        client = ctx.request_context.lifespan_context.get("sei")
+        if client is None:
+            raise ValueError("SEIClient nao configurado. Verifique as variaveis de ambiente.")
+        return client
+    return _obter_cliente_sessao(
+        "rest", lambda creds: SEIClient(**creds, permitir_arquivo_local=False)
+    )
 
 
 def _web_scraper_enabled() -> bool:
@@ -134,21 +199,13 @@ def _web_scraper_enabled() -> bool:
 
 
 def _get_web_client(ctx: Context) -> SEIWebClient:
-    """Retorna cliente web isolado por sessão OAuth."""
-    clientes = ctx.request_context.lifespan_context["sei_web"]
-
+    """Retorna o cliente web (scraper): stdio ou isolado por sessão OAuth."""
     if not _http_mode:
-        return clientes
-
-    sid, creds = _credenciais_sessao()
-
-    client = clientes.get(sid)
-    if client is None:
-        client = SEIWebClient(**creds)
-        clientes[sid] = client
-
-    return client
-
+        client = ctx.request_context.lifespan_context.get("sei_web")
+        if client is None:
+            raise ValueError("SEIWebClient nao configurado.")
+        return client
+    return _obter_cliente_sessao("web", lambda creds: SEIWebClient(**creds))
 
 
 _http_kwargs = {}
@@ -161,7 +218,7 @@ if _http_mode:
     _provider = SEIProOAuthProvider()
 
     _http_kwargs = {
-        "host": "127.0.0.1",
+        "host": _http_host,
         "port": _http_port,
         "stateless_http": True,
         "transport_security": TransportSecuritySettings(
@@ -2489,6 +2546,51 @@ async def _pedir_cargo(client: SEIClient) -> str:
     })
 
 
+async def _ativar_unidade_geradora(client: SEIClient, doc_id: str) -> str | None:
+    """Ativa a unidade geradora do documento, se o usuário tiver acesso a ela.
+
+    O SEI valida cargo e permissão contra a unidade ativa da sessão. Ativar a
+    unidade geradora evita o erro "cargo não associado" quando o usuário está
+    lotado em mais de uma unidade. É melhor-esforço: se o documento for de
+    outra unidade (ex.: recebido para assinatura), ou se alguma consulta
+    falhar, nada é trocado e o próprio SEI decide sobre a assinatura.
+
+    Retorna o id da unidade ativada, ou None.
+    """
+    try:
+        meta = await client.consultar_documento_interno(doc_id)
+        id_procedimento = str(meta.get("protocolo") or meta.get("idProcedimento") or "").strip()
+        if not id_procedimento:
+            return None
+
+        dados = await client.listar_documentos_todos(id_procedimento)
+        id_unidade = ""
+        for item in dados.get("documentos", []):
+            if not isinstance(item, dict):
+                continue
+            atrib = item.get("atributos") if isinstance(item.get("atributos"), dict) else {}
+            id_item = str(item.get("id") or atrib.get("idProtocolo") or "").strip()
+            if id_item == str(doc_id).strip():
+                id_unidade = str(atrib.get("idUnidade") or "").strip()
+                break
+        if not id_unidade:
+            return None
+
+        unidades = await client.listar_unidades_usuario()
+        permitidas = {
+            str(u.get("id") or u.get("idUnidade") or "").strip()
+            for u in unidades if isinstance(u, dict)
+        }
+        if id_unidade not in permitidas:
+            return None
+
+        await client.trocar_unidade(id_unidade)
+        return id_unidade
+    except Exception:
+        logger.debug("Não foi possível ativar a unidade geradora de %s", doc_id, exc_info=True)
+        return None
+
+
 @mcp.tool()
 async def sei_assinar_documento(
     id_documento: str,
@@ -2528,163 +2630,37 @@ async def sei_assinar_documento(
         if not cargo:
             return await _pedir_cargo(client)
 
-        # Garante que a autenticação rodou e captura IdUsuario da sessão
+        # Identidade do assinante: IdUsuario e IdOrgao vêm do loginData da
+        # MESMA autenticação que gerou o token (o AssinaturaRN do SEI exige os
+        # dois). Não se pesquisa identidade em /usuario/listar.
         await client._get_headers()
-        # SEI-PRO-ASSINATURA-AUTH-IDENTITY-V8
-        #
-        # Regra:
-        # - IdUsuario e IdOrgao vêm da MESMA autenticação que fornece o token;
-        # - não pesquisar identidade em /usuario/listar;
-        # - selecionar a unidade geradora do documento dentro desta mesma
-        #   operação antes de assinar.
-
-        await client._get_headers()
-
-        id_usuario = str(
-            getattr(client, "_id_usuario", "") or ""
-        ).strip()
-
-        # Algumas instalações do WSSEI não retornam IdOrgao em loginData.
-        # Nesse caso, usar o órgão da própria sessão autenticada.
-        id_orgao_usuario = str(
-            getattr(client, "_id_orgao_usuario", "")
-            or getattr(client, "_orgao", "")
-            or ""
-        ).strip()
-
-        if not id_usuario:
+        if not client._id_usuario:
             await client.autenticar()
-
-            id_usuario = str(
-                getattr(client, "_id_usuario", "") or ""
-            ).strip()
-
-            id_orgao_usuario = str(
-                getattr(client, "_id_orgao_usuario", "")
-                or getattr(client, "_orgao", "")
-                or ""
-            ).strip()
+        id_usuario = str(client._id_usuario or "").strip()
+        id_orgao_usuario = str(client._id_orgao_usuario or client._orgao or "").strip()
 
         if not id_usuario:
             return _json({
-                "error": "Assinatura bloqueada: autenticação SEI não forneceu IdUsuario."
+                "error": "Assinatura não enviada: a autenticação do SEI não "
+                         "informou o IdUsuario (loginData)."
             })
-
         if not id_orgao_usuario:
             return _json({
-                "error": "Assinatura bloqueada: órgão da sessão SEI não identificado."
+                "error": "Assinatura não enviada: órgão do usuário não identificado."
             })
 
-        # Localizar a unidade geradora real do documento.
-        try:
-            meta_doc = await client.consultar_documento_interno(doc_id)
-
-            id_procedimento_doc = str(
-                meta_doc.get("protocolo")
-                or meta_doc.get("idProcedimento")
-                or meta_doc.get("IdProcedimento")
-                or ""
-            ).strip()
-
-        except Exception:
-            return _json({
-                "error": "Assinatura bloqueada: processo do documento não identificado."
-            })
-
-        if not id_procedimento_doc:
-            return _json({
-                "error": "Assinatura bloqueada: documento sem processo identificado."
-            })
-
-        try:
-            dados_docs = await client.listar_documentos_todos(
-                id_procedimento_doc
-            )
-            documentos_proc = dados_docs.get("documentos", [])
-        except Exception:
-            return _json({
-                "error": "Assinatura bloqueada: falha ao consultar árvore do processo."
-            })
-
-        id_unidade_doc = ""
-        doc_id_normalizado = str(doc_id).strip()
-
-        for documento in documentos_proc:
-            if not isinstance(documento, dict):
-                continue
-
-            atributos = documento.get("atributos")
-            if not isinstance(atributos, dict):
-                atributos = {}
-
-            id_item = str(
-                documento.get("id")
-                or atributos.get("idProtocolo")
-                or atributos.get("IdProtocolo")
-                or ""
-            ).strip()
-
-            if id_item != doc_id_normalizado:
-                continue
-
-            id_unidade_doc = str(
-                atributos.get("idUnidade")
-                or atributos.get("IdUnidade")
-                or ""
-            ).strip()
-
-            if id_unidade_doc:
-                break
-
-        if not id_unidade_doc:
-            return _json({
-                "error": "Assinatura bloqueada: unidade geradora não localizada."
-            })
-
-        # Confirma que o usuário autenticado tem acesso à unidade.
-        try:
-            unidades_usuario = await client.listar_unidades_usuario()
-            ids_permitidos = {
-                str(
-                    u.get("id")
-                    or u.get("idUnidade")
-                    or u.get("IdUnidade")
-                    or ""
-                ).strip()
-                for u in unidades_usuario
-                if isinstance(u, dict)
-            }
-        except Exception:
-            return _json({
-                "error": "Assinatura bloqueada: não foi possível validar acesso à unidade."
-            })
-
-        if id_unidade_doc not in ids_permitidos:
-            return _json({
-                "error": "Assinatura bloqueada: usuário sem acesso à unidade geradora."
-            })
-
-        # Fundamental no modo HTTP/Online:
-        # troca de unidade e assinatura ocorrem na MESMA operação/cliente.
-        try:
-            await client.trocar_unidade(id_unidade_doc)
-        except Exception:
-            return _json({
-                "error": "Assinatura bloqueada: não foi possível ativar a unidade geradora."
-            })
-
-        # O WSSEI espera o órgão do próprio usuário assinante.
-        orgao_assinatura = id_orgao_usuario
+        unidade_ativada = await _ativar_unidade_geradora(client, doc_id)
 
         result = await client.assinar_documento(
             id_documento=doc_id,
             login=login,
             senha=senha,
             cargo=cargo,
-            orgao=orgao_assinatura,
-            # SEI-PRO-ASSINATURA-USUARIO-UNIDADE-V6
+            orgao=orgao or id_orgao_usuario,
             id_usuario=id_usuario,
         )
+        if isinstance(result, dict) and unidade_ativada:
+            result.setdefault("_unidade_ativada", unidade_ativada)
         return _json(result)
     except Exception as e:
         return _error(str(e))
@@ -4970,7 +4946,7 @@ def main():
 
         config = uvicorn.Config(
             app,
-            host="127.0.0.1",
+            host=_http_host,
             port=_http_port,
             log_level="info",
         )

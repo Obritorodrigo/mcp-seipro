@@ -23,6 +23,8 @@ RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
 
 # Railway injeta PORT como env var
 ENV PORT=8000
+# Dentro do container o servidor precisa escutar em todas as interfaces.
+ENV HOST=0.0.0.0
 EXPOSE 8000
 
 CMD ["mcp-seipro"]

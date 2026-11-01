@@ -1,13 +1,27 @@
-"""Persistência transacional de revogação e uso único de refresh OAuth."""
+"""Persistência transacional de revogação e uso único de refresh OAuth.
+
+O banco SQLite sobrevive a restart e é compartilhado entre processos (vários
+workers no mesmo host). Caminho: `SEI_REVOGACOES_DB` (padrão
+`/var/lib/sei-pro/revogacoes.sqlite3`). A pasta é criada se faltar; o usuário
+do serviço precisa poder gravar nela.
+"""
 
 import hashlib
 import os
 import sqlite3
 import time
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path("/var/lib/sei-pro/revogacoes.sqlite3")
+DB_PATH = Path(
+    os.environ.get("SEI_REVOGACOES_DB", "/var/lib/sei-pro/revogacoes.sqlite3")
+)
+
+# Caminhos cujo esquema já foi criado neste processo (evita CREATE TABLE a
+# cada token aberto). Por caminho, para que os testes possam trocar DB_PATH.
+_inicializados: set[str] = set()
+_init_lock = threading.Lock()
 
 
 def _hash(valor: str) -> str:
@@ -16,17 +30,27 @@ def _hash(valor: str) -> str:
 
 @contextmanager
 def _conectar():
-    # No banco novo, não deixar o umask do serviço criar arquivo legível por outros.
-    fd = os.open(str(DB_PATH), os.O_CREAT | os.O_RDWR, 0o600)
-    os.close(fd)
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    caminho = Path(DB_PATH)
+    chave = str(caminho)
+    if chave not in _inicializados:
+        with _init_lock:
+            if chave not in _inicializados:
+                caminho.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                # No banco novo, não deixar o umask do serviço criar arquivo
+                # legível por outros.
+                fd = os.open(chave, os.O_CREAT | os.O_RDWR, 0o600)
+                os.close(fd)
+    conn = sqlite3.connect(chave, timeout=10)
     try:
         conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("""CREATE TABLE IF NOT EXISTS sessoes_revogadas (
-            sid_hash TEXT PRIMARY KEY, expira_em REAL NOT NULL)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS refresh_utilizados (
-            jti_hash TEXT PRIMARY KEY, sid_hash TEXT NOT NULL,
-            usado_em REAL NOT NULL, expira_em REAL NOT NULL)""")
+        if chave not in _inicializados:
+            conn.execute("""CREATE TABLE IF NOT EXISTS sessoes_revogadas (
+                sid_hash TEXT PRIMARY KEY, expira_em REAL NOT NULL)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS refresh_utilizados (
+                jti_hash TEXT PRIMARY KEY, sid_hash TEXT NOT NULL,
+                usado_em REAL NOT NULL, expira_em REAL NOT NULL)""")
+            conn.commit()
+            _inicializados.add(chave)
         with conn:
             yield conn
     finally:

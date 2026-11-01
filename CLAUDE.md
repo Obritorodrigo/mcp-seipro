@@ -148,11 +148,20 @@ Funciona com qualquer instância SEI que tenha o módulo mod-wssei v2 instalado.
 
 ### Segurança do modo HTTP (OAuth, deploy remoto)
 - `auth.py`: tokens são **AES-256-GCM** (`s2.` + nonce‖ciphertext, chave via HKDF de `JWT_SECRET`), não mais base64+HMAC — a senha ficava legível no token. `JWT_SECRET` < 32 bytes → servidor não sobe
-- Access 1 h, refresh 14 d **rotativo** (reuso fora de 30 s revoga a sessão inteira), teto de sessão 30 d. `/revoke` derruba a sessão (`sid`). Estado de revogação é **em memória** (restart esquece)
+- Access 1 h, refresh 14 d **rotativo** (reuso fora de 30 s revoga a sessão inteira), teto de sessão 30 d. `/revoke` derruba a sessão (`sid`). Revogação e uso único do refresh ficam em **SQLite** (`revogacoes.py`, caminho `SEI_REVOGACOES_DB`, padrão `/var/lib/sei-pro/revogacoes.sqlite3`; ids gravados como sha256, arquivo 0600) → sobrevivem a restart e valem entre processos
+- **Cache de clientes por sessão** (`_obter_cliente_sessao` no server.py): com `stateless_http` o SDK recria o lifespan a CADA request (`StreamableHTTPSessionManager._handle_stateless_request` → `app.run`), então guardar cliente no lifespan não tem efeito e cada tool fazia um `/autenticar` novo. A cache é de módulo, chave `(tipo, sid, sha256(credenciais))`, TTL `SEI_CLIENT_CACHE_TTL` (600 s) e teto `SEI_CLIENT_CACHE_MAX` (200). Despejado só fecha após carência (pode estar em uso por request concorrente). Revogação continua valendo: o token é reaberto a cada chamada antes de consultar a cache. Testes: `tests/test_isolamento_multiusuario.py`, `tests/test_ciclo_vida_sessoes.py`
+- `HOST` (padrão `127.0.0.1`, para proxy reverso no mesmo host); o Dockerfile define `HOST=0.0.0.0`
 - `client_id` do registro dinâmico é **selado** (`c2.` + metadados criptografados) → sobrevive a restart sem banco. Sem isso, com access curto, todo deploy forçaria relogin
 - `redirect_uri` só https em `OAUTH_ALLOWED_REDIRECT_HOSTS` (padrão claude.ai, claude.com) ou http loopback. A tela de login mostra cliente e destino; tudo escapado e servido com CSP sem script
 - `seguranca.py`: URL do SEI no login exige https, host em `SEI_ALLOWED_HOSTS` (se definido) e IPs só públicos (anti-SSRF). `SEI_EXTRA_HEADERS`/`SEI_CF_CLEARANCE` só vão ao host de `SEI_URL` (ou `SEI_SECRET_HOSTS`)
 - `arquivo_path` desabilitado em modo HTTP (era leitura arbitrária de arquivos do servidor, ex. `/proc/self/environ`). Testes: `tests/test_seguranca_http.py`
+
+### Formulários em ISO-8859-1 (`SEI_FORM_CHARSET`)
+- O wssei repassa os campos de formulário **crus** ao núcleo do SEI (`getParam` não converte), que grava em ISO-8859-1. Campo enviado em UTF-8 vira `AdministraÃ§Ã£o` no banco — e na assinatura o cargo deixa de casar com o cadastro ("Cargo/Função … não está associado com este usuário"). Validado ao vivo em SEI 5.0.5 / wssei 3.0.4 (sei.rr.gov.br)
+- `_request` converte todo `data=dict` em corpo urlencoded ISO-8859-1 (`_codificar_formulario`); multipart idem nos campos (`_campos_multipart`). Tipografia fora do Latin-1 (– — “ ” …) é transliterada, não escapada: em campo de texto puro uma entidade apareceria literal
+- **JSON não precisa**: `secao/alterar` manda as seções via `json.dumps` (ASCII com `\uXXXX`), e o `json_decode` do PHP + conversão do wssei já entregam o texto certo — por isso a edição de seção nunca corrompeu acentos
+- `SEI_FORM_CHARSET=utf-8` restaura o envio antigo (para instalação que já converta do lado do servidor). O browser transport respeita `content=`; upload multipart via browser segue em UTF-8 (limitação do FormData)
+- Assinatura: `IdUsuario`/`IdOrgao` vêm do `loginData` do mesmo login (o `AssinaturaRN` exige ambos). `_ativar_unidade_geradora` troca para a unidade geradora **só se** o usuário tiver acesso a ela, e é melhor-esforço — documento de outra unidade ou falha de consulta não bloqueiam; o SEI decide. Testes: `tests/test_codificacao_formulario.py`, `tests/test_assinatura_unidade.py`
 
 ### Limitações conhecidas
 - **Cancelar/excluir DOCUMENTO não existe na API**: o mod-wssei (conferido no master, 3.x) não tem rota nem RN para isso — as únicas rotas "cancelar" são `/bloco/assinatura/{id}/disponibilizacao/cancelar` e `/processo/{protocolo}/cancelar/sobrestamento`. Uma minuta indesejada só sai pela interface web (ou pelo scraper, hoje inoperante por SSO). Não há como fechar esse ciclo de erro do agente sem mudança no módulo

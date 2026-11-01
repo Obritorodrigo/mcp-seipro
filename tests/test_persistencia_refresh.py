@@ -66,3 +66,27 @@ def test_refresh_concorrente_somente_um_vencedor():
                 return False
         return await asyncio.gather(tentativa(),tentativa())
     assert sorted(run(verificar())) == [False,True]
+
+
+def test_caminho_configuravel_e_pasta_criada(monkeypatch, tmp_path):
+    destino = tmp_path / "subpasta" / "nova" / "rev.sqlite3"
+    monkeypatch.setattr(revogacoes, "DB_PATH", destino)
+
+    revogacoes.revogar("sid-x", time.time() + 100)
+
+    assert destino.exists()
+    assert stat.S_IMODE(os.stat(destino).st_mode) == 0o600
+    assert revogacoes.esta_revogada("sid-x")
+
+
+def test_variavel_de_ambiente_define_caminho(monkeypatch, tmp_path):
+    import importlib
+
+    destino = tmp_path / "env.sqlite3"
+    monkeypatch.setenv("SEI_REVOGACOES_DB", str(destino))
+    modulo = importlib.reload(revogacoes)
+    try:
+        assert modulo.DB_PATH == destino
+    finally:
+        monkeypatch.delenv("SEI_REVOGACOES_DB")
+        importlib.reload(revogacoes)

@@ -1,6 +1,14 @@
-"""Testes locais de ciclo de vida dos clientes OAuth."""
+"""Ciclo de vida dos clientes SEI em modo HTTP.
+
+No `stateless_http` o SDK entra e sai do lifespan a CADA request. Se o lifespan
+fechasse os clientes, a cache por sessão seria inútil (um login no SEI por
+tool). Os clientes só são fechados ao serem despejados da cache, após carência.
+"""
+
+import asyncio
 
 import pytest
+
 import mcp_seipro.server as srv
 
 
@@ -13,34 +21,29 @@ class ClienteFicticio:
 
 
 @pytest.mark.asyncio
-async def test_lifespan_encerra_clientes_rest_e_web(monkeypatch):
+async def test_lifespan_http_nao_fecha_clientes_da_cache(monkeypatch):
     monkeypatch.setattr(srv, "_http_mode", True)
-
-    rest_a = ClienteFicticio()
-    rest_b = ClienteFicticio()
-    web_a = ClienteFicticio()
-    web_b = ClienteFicticio()
+    cliente = ClienteFicticio()
+    monkeypatch.setattr(srv, "_cache_clientes", {("rest", "sid-A", "h"): [0.0, cliente]})
 
     async with srv.lifespan(srv.mcp) as estado:
-        estado["sei"]["sid-A"] = rest_a
-        estado["sei"]["sid-B"] = rest_b
-        estado["sei_web"]["sid-A"] = web_a
-        estado["sei_web"]["sid-B"] = web_b
+        assert estado == {"sei": None, "sei_web": None}
 
-        assert rest_a.fechamentos == 0
-        assert rest_b.fechamentos == 0
-
-    assert rest_a.fechamentos == 1
-    assert rest_b.fechamentos == 1
-    assert web_a.fechamentos == 1
-    assert web_b.fechamentos == 1
+    assert cliente.fechamentos == 0
+    assert ("rest", "sid-A", "h") in srv._cache_clientes
 
 
 @pytest.mark.asyncio
-async def test_lifespan_nao_compartilha_dicionarios(monkeypatch):
-    monkeypatch.setattr(srv, "_http_mode", True)
+async def test_cliente_despejado_fecha_apos_carencia(monkeypatch):
+    monkeypatch.setattr(srv, "_CACHE_GRACA_FECHAR", 0.01)
+    cliente = ClienteFicticio()
 
-    async with srv.lifespan(srv.mcp) as estado:
-        assert estado["sei"] is not estado["sei_web"]
-        assert estado["sei"] == {}
-        assert estado["sei_web"] == {}
+    srv._fechar_depois(cliente)
+    assert cliente.fechamentos == 0  # não fecha na hora: pode estar em uso
+
+    await asyncio.sleep(0.05)
+    assert cliente.fechamentos == 1
+
+
+def test_fechar_depois_sem_loop_nao_falha():
+    srv._fechar_depois(ClienteFicticio())  # fora de loop: só ignora
