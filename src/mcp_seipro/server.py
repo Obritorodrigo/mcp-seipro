@@ -3793,6 +3793,59 @@ async def sei_assinar_documentos_bloco(
 
 
 @mcp.tool()
+async def sei_alterar_marcador(
+    marcador: str,
+    novo_nome: str = "",
+    id_cor: str = "",
+    ctx: Context = None,
+) -> str:
+    """Renomeia e/ou troca a cor de um marcador da unidade atual.
+
+    A mudança vale para toda a unidade e para todos os processos que já usam o marcador.
+
+    - marcador: id ou nome atual (sem acento/maiúsculas importarem; tem de ser único)
+    - novo_nome: novo nome (vazio = mantém o atual)
+    - id_cor: id da cor (vazio = mantém a atual; cores em sei_criar_marcador sem id_cor)
+
+    Não renomeia para um nome que outro marcador da unidade já usa.
+    """
+    try:
+        client = _get_client(ctx)
+        dados = await client.pesquisar_marcadores(limit=200)
+        marcadores = dados.get("marcadores", [])
+        alvo_txt = _normalizar_busca(marcador)
+        alvo = [m for m in marcadores if str(m.get("id")) == str(marcador).strip()] \
+            or [m for m in marcadores if _normalizar_busca(m.get("nome", "")) == alvo_txt]
+        if len(alvo) != 1:
+            return _json({
+                "error": ("Marcador não encontrado." if not alvo else "Mais de um marcador com esse nome.")
+                + " Nada foi alterado.",
+                "marcadores_disponiveis": [{"id": m.get("id"), "nome": m.get("nome")} for m in marcadores],
+            })
+        atual = alvo[0]
+        nome = (novo_nome or "").strip() or atual.get("nome", "")
+        cor = (id_cor or "").strip() or str(atual.get("idCor", ""))
+        if not novo_nome and not id_cor:
+            return _error("Informe novo_nome e/ou id_cor. Nada foi alterado.")
+        repetido = [m for m in marcadores if str(m.get("id")) != str(atual.get("id"))
+                    and _normalizar_busca(m.get("nome", "")) == _normalizar_busca(nome)]
+        if repetido:
+            return _json({
+                "error": f"Já existe o marcador '{repetido[0].get('nome')}' (id {repetido[0].get('id')}). "
+                         "Nada foi alterado.",
+            })
+        await client.alterar_marcador(str(atual["id"]), nome, cor)
+        return _json({
+            "mensagem": "Marcador alterado.",
+            "id": atual.get("id"),
+            "antes": {"nome": atual.get("nome"), "idCor": atual.get("idCor")},
+            "depois": {"nome": nome, "idCor": cor},
+        })
+    except Exception as e:
+        return _error(str(e))
+
+
+@mcp.tool()
 async def sei_criar_marcador(
     nome: str,
     id_cor: str = "",
@@ -6323,6 +6376,7 @@ _TITULOS_TOOLS = {
     "sei_assinar_bloco": "Assinar bloco de assinatura",
     "sei_assinar_documentos_bloco": "Assinar documentos do bloco",
     "sei_criar_marcador": "Criar marcador",
+    "sei_alterar_marcador": "Alterar marcador",
     "sei_excluir_marcador": "Excluir marcador",
     "sei_marcar_processo": "Marcar processo",
     "sei_pesquisar_marcadores": "Pesquisar marcadores",

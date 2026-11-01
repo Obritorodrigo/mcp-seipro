@@ -66,3 +66,47 @@ async def test_numero_sem_acesso_nao_vira_outro_documento(monkeypatch):
     monkeypatch.setattr(srv, "_resolver_documento", resolver)
     r = json.loads(await srv.sei_incluir_documento_bloco_assinatura(id_bloco="1", documentos="24847106", ctx=CTX))
     assert "error" in r and c.chamadas == []
+
+
+# --- renomear marcador ------------------------------------------------------------
+
+class ClienteMarcadores:
+    def __init__(self):
+        self.alterados = []
+        self.lista = [
+            {"id": "41058", "nome": "#6f0b0b", "idCor": "1"},
+            {"id": "21996", "nome": "AGUARDANDO RETORNO", "idCor": "7"},
+            {"id": "28055", "nome": "AGUARDANDO RETORNO #090601", "idCor": "2"},
+        ]
+
+    async def pesquisar_marcadores(self, limit=50, **kw):
+        return {"marcadores": self.lista}
+
+    async def alterar_marcador(self, id_marcador, nome, id_cor):
+        self.alterados.append((id_marcador, nome, id_cor))
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_renomeia_mantendo_cor(monkeypatch):
+    c = ClienteMarcadores()
+    monkeypatch.setattr(srv, "_get_client", lambda ctx: c)
+    r = json.loads(await srv.sei_alterar_marcador(marcador="#6f0b0b", novo_nome="PRIORIDADE", ctx=CTX))
+    assert c.alterados == [("41058", "PRIORIDADE", "1")]
+    assert r["antes"]["nome"] == "#6f0b0b"
+
+
+@pytest.mark.asyncio
+async def test_nao_duplica_nome(monkeypatch):
+    c = ClienteMarcadores()
+    monkeypatch.setattr(srv, "_get_client", lambda ctx: c)
+    r = json.loads(await srv.sei_alterar_marcador(marcador="28055", novo_nome="aguardando retorno", ctx=CTX))
+    assert "Já existe" in r["error"] and c.alterados == []
+
+
+@pytest.mark.asyncio
+async def test_marcador_inexistente(monkeypatch):
+    c = ClienteMarcadores()
+    monkeypatch.setattr(srv, "_get_client", lambda ctx: c)
+    r = json.loads(await srv.sei_alterar_marcador(marcador="xyz", novo_nome="a", ctx=CTX))
+    assert "não encontrado" in r["error"] and len(r["marcadores_disponiveis"]) == 3

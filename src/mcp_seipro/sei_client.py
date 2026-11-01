@@ -1696,6 +1696,11 @@ class SEIClient:
             self._cache_set(cache_key, result)
         return result
 
+    def _limpar_cache_marcadores(self) -> None:
+        """A lista de marcadores fica em cache 1 h; qualquer mudança a invalida."""
+        for chave in [k for k in self._cache if k.startswith("marcadores:")]:
+            self._cache.pop(chave, None)
+
     async def listar_cores_marcador(self) -> list[dict]:
         """Lista cores disponíveis para marcadores."""
         resp = await self._request("GET", "/marcador/cores/listar")
@@ -1706,6 +1711,7 @@ class SEIClient:
 
     async def criar_marcador(self, nome: str, id_cor: str) -> dict:
         """Cria marcador na unidade atual."""
+        self._limpar_cache_marcadores()
         resp = await self._request(
             "POST", "/marcador/criar", data={"nome": nome, "idCor": id_cor}
         )
@@ -1716,6 +1722,7 @@ class SEIClient:
 
     async def alterar_marcador(self, id_marcador: str, nome: str, id_cor: str) -> dict:
         """Altera nome e/ou cor de um marcador."""
+        self._limpar_cache_marcadores()
         resp = await self._request(
             "POST", f"/marcador/{id_marcador}/alterar",
             data={"nome": nome, "idCor": id_cor},
@@ -1727,6 +1734,7 @@ class SEIClient:
 
     async def excluir_marcadores(self, ids: str) -> dict:
         """Exclui marcador(es). IDs separados por vírgula."""
+        self._limpar_cache_marcadores()
         resp = await self._request(
             "POST", "/marcador/excluir", data={"marcadores": ids}
         )
@@ -1737,6 +1745,7 @@ class SEIClient:
 
     async def desativar_marcadores(self, ids: str) -> dict:
         """Desativa marcador(es) sem excluir. IDs separados por vírgula."""
+        self._limpar_cache_marcadores()
         resp = await self._request(
             "POST", "/marcador/desativar", data={"marcadores": ids}
         )
@@ -1747,6 +1756,7 @@ class SEIClient:
 
     async def reativar_marcadores(self, ids: str) -> dict:
         """Reativa marcador(es) desativados. IDs separados por vírgula."""
+        self._limpar_cache_marcadores()
         resp = await self._request(
             "POST", "/marcador/reativar", data={"marcadores": ids}
         )
